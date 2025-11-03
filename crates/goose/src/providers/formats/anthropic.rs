@@ -398,7 +398,12 @@ pub fn create_request(
 
     // https://platform.claude.com/docs/en/about-claude/models/overview
     // 64k output tokens works for most claude models, but not old opus:
-    let max_tokens = model_config.max_tokens.unwrap_or_else(|| {
+    // Allow override via ANTHROPIC_MAX_TOKENS.
+    let env_max_tokens: Option<i32> = std::env::var("ANTHROPIC_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok());
+
+    let max_tokens = model_config.max_tokens.or(env_max_tokens).unwrap_or_else(|| {
         let name = &model_config.model_name;
         if name.contains("claude-3-haiku") {
             4096
