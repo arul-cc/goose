@@ -54,6 +54,7 @@ pub struct AnthropicProvider {
     api_client: ApiClient,
     model: ModelConfig,
     supports_streaming: bool,
+    custom_headers: Option<HashMap<String, String>>,
     name: String,
 }
 
@@ -79,6 +80,7 @@ impl AnthropicProvider {
             api_client,
             model,
             supports_streaming: true,
+            custom_headers: None,
             name: ANTHROPIC_PROVIDER_NAME.to_string(),
         })
     }
@@ -114,6 +116,7 @@ impl AnthropicProvider {
             api_client,
             model,
             supports_streaming: config.supports_streaming.unwrap_or(true),
+            custom_headers: config.headers,
             name: config.name.clone(),
         })
     }
@@ -298,6 +301,12 @@ impl Provider for AnthropicProvider {
 
         for (key, value) in self.get_conditional_headers() {
             request = request.header(key, value)?;
+        }
+
+        if let Some(custom_headers) = &self.custom_headers {
+            for (key, value) in custom_headers {
+                request = request.header(key, value)?;
+            }
         }
 
         let resp = request.response_post(&payload).await.inspect_err(|e| {
