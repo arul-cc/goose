@@ -52,6 +52,7 @@ use serde_json::Value;
 
 type McpClientBox = Arc<Mutex<Box<dyn McpClientTrait>>>;
 
+
 struct Extension {
     pub config: ExtensionConfig,
 
@@ -504,13 +505,37 @@ impl ExtensionManager {
                 name,
                 envs,
                 env_keys,
+                allowed_headers,
                 ..
             } => {
                 let all_envs = merge_environments(envs, env_keys, &sanitized_name).await?;
+                // Merge dynamic headers from session if available and allowed
+                let mut merged_headers = headers.clone();
+                if let Some(session_id) = crate::session_context::current_session_id() {
+                    if let Ok(session) = crate::session::SessionManager::instance().get_session(&session_id, false).await {
+                        if let Some(headers_value) = session.extension_data.get_extension_state("websocket_headers", "v0") {
+                            if let Some(headers_obj) = headers_value.as_object() {
+                                for (key, value) in headers_obj {
+                                    // Filter by allowed_headers if specified
+                                    let allowed = allowed_headers;
+                                    if !allowed.is_empty() && !allowed.contains(key) {
+                                        tracing::debug!("[EXTENSION_MANAGER] Skipping header '{}' - not in allowed_headers list", key);
+                                        continue;
+                                    }
+                                    if let Some(val_str) = value.as_str() {
+                                        merged_headers.insert(key.clone(), val_str.to_string());
+                                        tracing::info!("[EXTENSION_MANAGER] Merged header '{}' into HTTP client default headers", key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 create_streamable_http_client(
                     uri,
                     *timeout,
-                    headers,
+                    &merged_headers,
                     name,
                     &all_envs,
                     self.provider.clone(),
@@ -1191,6 +1216,8 @@ impl ExtensionManager {
         tool_call: CallToolRequestParams,
         cancellation_token: CancellationToken,
     ) -> Result<ToolCallResult> {
+        eprintln!("[EXTENSION_MANAGER] Dispatching tool call: {}", tool_call.name);
+        tracing::info!("[EXTENSION_MANAGER] Dispatching tool call: {}", tool_call.name);
         // Some models strip the tool prefix, so auto-add it for known code_execution tools
         let tool_name_str = tool_call.name.to_string();
         let prefixed_name = if !tool_name_str.contains("__") {
@@ -1205,7 +1232,6 @@ impl ExtensionManager {
         } else {
             tool_name_str
         };
-
         // Dispatch tool call based on the prefix naming convention
         let (client_name, client) =
             self.get_client_for_tool(&prefixed_name)
@@ -1217,6 +1243,8 @@ impl ExtensionManager {
                         None,
                     )
                 })?;
+        eprintln!("[EXTENSION_MANAGER] Tool call '{}' routed to extension '{}'", tool_call.name, client_name);
+        tracing::debug!("[EXTENSION_MANAGER] Tool call '{}' routed to extension '{}'", tool_call.name, client_name);
 
         let tool_name = prefixed_name
             .strip_prefix(client_name.as_str())
@@ -1230,41 +1258,66 @@ impl ExtensionManager {
             })?
             .to_string();
 
-        if let Some(extension) = self.extensions.lock().await.get(&client_name) {
-            if !extension.config.is_tool_available(&tool_name) {
-                return Err(ErrorData::new(
-                    ErrorCode::RESOURCE_NOT_FOUND,
-                    format!(
-                        "Tool '{}' is not available for extension '{}'",
-                        tool_name, client_name
-                    ),
-                    None,
-                )
-                .into());
+        // Get allowed headers for this extension and check tool availability in one lock
+        let allowed_headers = {
+            let extensions = self.extensions.lock().await;
+            if let Some(extension) = extensions.get(&client_name) {
+                // Check if tool is available
+                if !extension.config.is_tool_available(&tool_name) {
+                    return Err(ErrorData::new(
+                        ErrorCode::RESOURCE_NOT_FOUND,
+                        format!(
+                            "Tool '{}' is not available for extension '{}'",
+                            tool_name, client_name
+                        ),
+                        None,
+                    )
+                    .into());
+                }
+
+                // Get allowed headers based on extension type
+                match &extension.config {
+                    ExtensionConfig::StreamableHttp { allowed_headers, .. } => {
+                        eprintln!("[EXTENSION_MANAGER] Extension '{}' has allowed_headers: {:?}", client_name, allowed_headers);
+                        tracing::info!("[EXTENSION_MANAGER] Extension '{}' has allowed_headers: {:?}", client_name, allowed_headers);
+                        Some(allowed_headers.clone())
+                    }
+                    _ => {
+                        eprintln!("[EXTENSION_MANAGER] Extension '{}' is not StreamableHttp type", client_name);
+                        tracing::debug!("[EXTENSION_MANAGER] Extension '{}' is not StreamableHttp type", client_name);
+                        None
+                    }
+                }
+            } else {
+                eprintln!("[EXTENSION_MANAGER] Extension '{}' not found in extensions map", client_name);
+                tracing::warn!("[EXTENSION_MANAGER] Extension '{}' not found in extensions map", client_name);
+                None
             }
-        }
+        };
 
         let arguments = tool_call.arguments.clone();
         let client = client.clone();
         let notifications_receiver = client.lock().await.subscribe().await;
         let session_id = session_id.to_string();
 
+        // Capture session_id before entering async closure to preserve context
+        // We use the passed session_id which ensures the tool runs in the correct session context
+        tracing::debug!("[EXTENSION_MANAGER] Using session_id for tool call: {}", session_id);
+
         let fut = async move {
-            tracing::debug!(
-                "dispatch_tool_call fut: calling client.call_tool tool={} session_id={}",
-                tool_name,
-                session_id
-            );
-            let client_guard = client.lock().await;
-            client_guard
-                .call_tool(&session_id, &tool_name, arguments, cancellation_token)
-                .await
-                .map_err(|e| match e {
-                    ServiceError::McpError(error_data) => error_data,
-                    _ => {
-                        ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), e.maybe_to_value())
-                    }
-                })
+            // Restore session context for the async closure
+            crate::session_context::with_session_id(Some(session_id.clone()), async move {
+                let client_guard = client.lock().await;
+                client_guard
+                    .call_tool(&session_id, &tool_name, arguments, cancellation_token, allowed_headers)
+                    .await
+                    .map_err(|e| match e {
+                        ServiceError::McpError(error_data) => error_data,
+                        _ => {
+                            ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), e.maybe_to_value())
+                        }
+                    })
+            }).await
         };
 
         Ok(ToolCallResult {
@@ -1592,6 +1645,7 @@ mod tests {
             name: &str,
             _arguments: Option<JsonObject>,
             _cancellation_token: CancellationToken,
+            _allowed_headers: Option<Vec<String>>,
         ) -> Result<CallToolResult, Error> {
             match name {
                 "tool" | "test__tool" | "available_tool" | "hidden_tool" => Ok(CallToolResult {

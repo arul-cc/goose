@@ -307,6 +307,7 @@ impl McpClientTrait for SkillsClient {
         name: &str,
         arguments: Option<JsonObject>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let content = match name {
             "loadSkill" => self.handle_load_skill(arguments).await,

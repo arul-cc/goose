@@ -532,6 +532,7 @@ impl McpClientTrait for AppsManagerClient {
         name: &str,
         arguments: Option<JsonObject>,
         _cancel_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let result = match name {
             "list_apps" => self.handle_list_apps(arguments).await,

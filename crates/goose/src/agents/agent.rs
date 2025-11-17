@@ -576,14 +576,17 @@ impl Agent {
             )))
         } else {
             // Clone the result to ensure no references to extension_manager are returned
-            let result = self
-                .extension_manager
-                .dispatch_tool_call(
-                    &session.id,
-                    tool_call.clone(),
-                    cancellation_token.unwrap_or_default(),
-                )
-                .await;
+            // Wrap in session context so that session_id is available for header filtering
+            let result = crate::session_context::with_session_id(Some(session.id.clone()), async {
+                self
+                    .extension_manager
+                    .dispatch_tool_call(
+                        &session.id,
+                        tool_call.clone(),
+                        cancellation_token.unwrap_or_default(),
+                    )
+                    .await
+            }).await;
             result.unwrap_or_else(|e| {
                 crate::posthog::emit_error(
                     "tool_execution_failed",

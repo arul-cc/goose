@@ -842,6 +842,7 @@ impl McpClientTrait for CodeExecutionClient {
         name: &str,
         arguments: Option<JsonObject>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let content = match name {
             "execute_code" => self.handle_execute_code(session_id, arguments).await,
@@ -920,6 +921,7 @@ mod tests {
                 "execute_code",
                 Some(args),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -957,6 +959,7 @@ mod tests {
                 "execute_code",
                 Some(args),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();

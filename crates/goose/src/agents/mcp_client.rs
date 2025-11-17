@@ -52,6 +52,7 @@ pub trait McpClientTrait: Send + Sync {
         name: &str,
         arguments: Option<JsonObject>,
         cancel_token: CancellationToken,
+        allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error>;
 
     fn get_info(&self) -> Option<&InitializeResult>;
@@ -478,7 +479,7 @@ impl McpClientTrait for McpClient {
                 ClientRequest::ListResourcesRequest(ListResourcesRequest {
                     params: Some(PaginatedRequestParams { meta: None, cursor }),
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -505,7 +506,7 @@ impl McpClientTrait for McpClient {
                         uri: uri.to_string(),
                     },
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -529,7 +530,7 @@ impl McpClientTrait for McpClient {
                 ClientRequest::ListToolsRequest(ListToolsRequest {
                     params: Some(PaginatedRequestParams { meta: None, cursor }),
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -547,7 +548,20 @@ impl McpClientTrait for McpClient {
         name: &str,
         arguments: Option<JsonObject>,
         cancel_token: CancellationToken,
+        allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
+        eprintln!("[MCP_CLIENT] call_tool called for tool: {} with allowed_headers: {:?}", name, allowed_headers);
+        tracing::info!("[MCP_CLIENT] call_tool called for tool: {} with allowed_headers: {:?}", name, allowed_headers);
+        let extensions = inject_session_into_extensions(Default::default(), allowed_headers).await;
+        if let Some(meta) = extensions.get::<rmcp::model::Meta>() {
+            if let Some(headers_value) = meta.0.get("websocket_headers") {
+                eprintln!("[MCP_CLIENT] Headers in MCP extensions for tool '{}': {:?}", name, headers_value);
+                tracing::info!("[MCP_CLIENT] Headers in MCP extensions for tool '{}': {:?}", name, headers_value);
+            } else {
+                eprintln!("[MCP_CLIENT] No websocket_headers in MCP extensions for tool '{}'", name);
+                tracing::debug!("[MCP_CLIENT] No websocket_headers in MCP extensions for tool '{}'", name);
+            }
+        }
         let request = ClientRequest::CallToolRequest(CallToolRequest {
             params: CallToolRequestParams {
                 meta: None,
@@ -556,7 +570,7 @@ impl McpClientTrait for McpClient {
                 arguments,
             },
             method: Default::default(),
-            extensions: Default::default(),
+            extensions,
         });
 
         let result = self
@@ -581,7 +595,7 @@ impl McpClientTrait for McpClient {
                 ClientRequest::ListPromptsRequest(ListPromptsRequest {
                     params: Some(PaginatedRequestParams { meta: None, cursor }),
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -614,7 +628,7 @@ impl McpClientTrait for McpClient {
                         arguments,
                     },
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -654,8 +668,85 @@ fn inject_session_id_into_extensions(
             Value::String(session_id.to_string()),
         );
     }
-
     extensions.insert(Meta(meta_map));
+    extensions
+}
+
+/// Replaces session ID, case-insensitively, in Extensions._meta.
+/// Also injects dynamic headers from session if available, filtered by allowed_headers.
+async fn inject_session_into_extensions(
+    mut extensions: rmcp::model::Extensions,
+    allowed_headers: Option<Vec<String>>,
+) -> rmcp::model::Extensions {
+    use rmcp::model::Meta;
+
+    eprintln!("[MCP_CLIENT] inject_session_into_extensions called with allowed_headers: {:?}", allowed_headers);
+    tracing::debug!("[MCP_CLIENT] inject_session_into_extensions called with allowed_headers: {:?}", allowed_headers);
+
+    let session_id_opt = crate::session_context::current_session_id();
+    eprintln!("[MCP_CLIENT] Current session_id in inject_session_into_extensions: {:?}", session_id_opt);
+    tracing::debug!("[MCP_CLIENT] Current session_id in inject_session_into_extensions: {:?}", session_id_opt);
+
+    if let Some(session_id) = session_id_opt {
+        let mut meta_map = extensions
+            .get::<Meta>()
+            .map(|meta| meta.0.clone())
+            .unwrap_or_default();
+
+        // JsonObject is case-sensitive, so we use retain for case-insensitive removal
+        meta_map.retain(|k, _| !k.eq_ignore_ascii_case(SESSION_ID_HEADER));
+
+        meta_map.insert(SESSION_ID_HEADER.to_string(), Value::String(session_id.clone()));
+
+        // Inject dynamic headers from session if available
+        // Headers will be filtered by extension's allowed_headers when making tool calls
+        eprintln!("[MCP_CLIENT] Checking for headers in session {}", session_id);
+        tracing::debug!("[MCP_CLIENT] Checking for headers in session {}", session_id);
+        if let Ok(session) = crate::session::SessionManager::instance().get_session(&session_id, false).await {
+            eprintln!("[MCP_CLIENT] Retrieved session {}, checking extension_data", session_id);
+            tracing::debug!("[MCP_CLIENT] Retrieved session {}, checking extension_data", session_id);
+            if let Some(headers_value) = session.extension_data.get_extension_state("websocket_headers", "v0") {
+                eprintln!("[MCP_CLIENT] Found headers in session extension_data: {:?}", headers_value);
+                tracing::info!("[MCP_CLIENT] Found headers in session extension_data: {:?}", headers_value);
+                if let Some(headers_obj) = headers_value.as_object() {
+                    let mut headers_map = serde_json::Map::new();
+                    for (key, value) in headers_obj {
+                        // Filter by allowed_headers if provided
+                        if let Some(ref allowed) = allowed_headers {
+                            if !allowed.is_empty() && !allowed.contains(key) {
+                                eprintln!("[MCP_CLIENT] Filtering out header '{}' - not in allowed_headers list", key);
+                                tracing::debug!("[MCP_CLIENT] Filtering out header '{}' - not in allowed_headers list", key);
+                                continue;
+                            }
+                        }
+                        headers_map.insert(key.clone(), value.clone());
+                        eprintln!("[MCP_CLIENT] Adding header to MCP extensions: {} = {:?}", key, value);
+                        tracing::debug!("[MCP_CLIENT] Adding header to MCP extensions: {} = {:?}", key, value);
+                    }
+                    if !headers_map.is_empty() {
+                        meta_map.insert("websocket_headers".to_string(), Value::Object(headers_map.clone()));
+                        eprintln!("[MCP_CLIENT] Injected {} headers into MCP extensions meta", headers_map.len());
+                        tracing::info!("[MCP_CLIENT] Injected {} headers into MCP extensions meta", headers_map.len());
+                    } else {
+                        eprintln!("[MCP_CLIENT] No headers passed allowed_headers filter");
+                        tracing::debug!("[MCP_CLIENT] No headers passed allowed_headers filter");
+                    }
+                } else {
+                    eprintln!("[MCP_CLIENT] WARN: Headers value is not an object: {:?}", headers_value);
+                    tracing::warn!("[MCP_CLIENT] Headers value is not an object: {:?}", headers_value);
+                }
+            } else {
+                eprintln!("[MCP_CLIENT] No websocket_headers found in session extension_data");
+                tracing::debug!("[MCP_CLIENT] No websocket_headers found in session extension_data");
+            }
+        } else {
+            eprintln!("[MCP_CLIENT] WARN: Failed to retrieve session {} for headers", session_id);
+            tracing::warn!("[MCP_CLIENT] Failed to retrieve session {} for headers", session_id);
+        }
+
+        extensions.insert(Meta(meta_map));
+    }
+
     extensions
 }
 
@@ -899,26 +990,38 @@ mod tests {
         });
         "empty removes"
     )]
-    fn test_session_id_case_insensitive_replacement(
+    async fn test_session_id_case_insensitive_replacement(
         session_id: Option<&str>,
         expected_meta: serde_json::Value,
     ) {
         use rmcp::model::Extensions;
         use serde_json::{from_value, json};
 
-        let mut extensions = Extensions::new();
-        extensions.insert(
-            from_value::<Meta>(json!({
-                SESSION_ID_HEADER: "old-session-1",
-                "Agent-Session-Id": "old-session-2",
-                "other-key": "preserve-me"
-            }))
-            .unwrap(),
-        );
+        let session_id = "new-session-id";
+        crate::session_context::with_session_id(Some(session_id.to_string()), async {
+            let mut extensions = Extensions::new();
+            extensions.insert(
+                from_value::<Meta>(json!({
+                    "GOOSE-SESSION-ID": "old-session-1",
+                    "Goose-Session-Id": "old-session-2",
+                    "other-key": "preserve-me"
+                }))
+                .unwrap(),
+            );
 
-        let extensions = inject_session_id_into_extensions(extensions, session_id);
-        let mcp_meta = extensions.get::<Meta>().unwrap();
+            let extensions = inject_session_into_extensions(extensions, None).await;
+            let meta = extensions.get::<Meta>().unwrap();
 
-        assert_eq!(&mcp_meta.0, expected_meta.as_object().unwrap());
+            assert_eq!(
+                &meta.0,
+                json!({
+                    SESSION_ID_HEADER: session_id,
+                    "other-key": "preserve-me"
+                })
+                .as_object()
+                .unwrap()
+            );
+        })
+        .await;
     }
 }

@@ -1030,6 +1030,7 @@ fn configure_streamable_http_extension() -> anyhow::Result<()> {
             timeout: Some(timeout),
             bundled: None,
             available_tools: Vec::new(),
+            allowed_headers: Vec::new(),
         },
     });
 

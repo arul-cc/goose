@@ -175,6 +175,7 @@ impl McpClientTrait for TodoClient {
         name: &str,
         arguments: Option<JsonObject>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let content = match name {
             "todo_write" => self.handle_write_todo(session_id, arguments).await,

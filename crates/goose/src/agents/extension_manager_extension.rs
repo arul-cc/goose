@@ -436,6 +436,7 @@ impl McpClientTrait for ExtensionManagerClient {
         name: &str,
         arguments: Option<JsonObject>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let result = match name {
             SEARCH_AVAILABLE_EXTENSIONS_TOOL_NAME => {
