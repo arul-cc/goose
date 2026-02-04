@@ -16,6 +16,7 @@ use super::errors::ProviderError;
 use super::formats::anthropic::{
     create_request, get_usage, response_to_message, response_to_streaming_message,
 };
+use serde_json::json;
 use super::openai_compatible::handle_status_openai_compat;
 use super::openai_compatible::map_http_error_to_provider_error;
 use super::utils::get_model;
@@ -177,7 +178,37 @@ impl AnthropicProvider {
                     response.payload,
                 ))
             }
+            }
         }
+
+
+    async fn get_session_metadata(&self, session_id: Option<&str>) -> Option<Value> {
+        let session_id = session_id?;
+        let session = crate::session::SessionManager::instance()
+            .get_session(session_id, false)
+            .await
+            .ok()?;
+
+        let websocket_headers = session
+            .extension_data
+            .get_extension_state("websocket_headers", "v0")?;
+
+        let user_id = websocket_headers.as_object().and_then(|headers| {
+            headers.iter().find_map(|(k, v)| {
+                if k.eq_ignore_ascii_case("x-cow-security-context") {
+                    v.as_str().and_then(|s| {
+                        serde_json::from_str::<Value>(s).ok().and_then(|json| {
+                            json.get("ID")
+                                .and_then(|e| e.as_str().map(|s| s.to_string()))
+                        })
+                    })
+                } else {
+                    None
+                }
+            })
+        })?;
+
+        Some(json!({ "user_id": user_id }))
     }
 }
 
@@ -236,7 +267,10 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<(Message, ProviderUsage), ProviderError> {
-        let payload = create_request(model_config, system, messages, tools)?;
+        let metadata = self.get_session_metadata(session_id).await;
+        let payload = create_request(model_config, system, messages, tools, metadata)?;
+
+        eprintln!("🔵 Anthropic payload: {}", payload);
 
         let response = self
             .with_retry(|| async { self.post(session_id, &payload).await })
@@ -291,7 +325,8 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let mut payload = create_request(&self.model, system, messages, tools)?;
+        let metadata = self.get_session_metadata(Some(session_id)).await;
+        let mut payload = create_request(&self.model, system, messages, tools, metadata)?;
         payload
             .as_object_mut()
             .unwrap()
