@@ -1,7 +1,7 @@
 use crate::recipes::github_recipe::GOOSE_RECIPE_GITHUB_REPO_CONFIG_KEY;
 use cliclack::spinner;
 use console::style;
-use goose::agents::extension::ToolInfo;
+use goose::agents::extension::{ToolInfo, PLATFORM_EXTENSIONS};
 use goose::agents::extension_manager::get_parameter_names;
 use goose::agents::Agent;
 use goose::agents::{extension::Envs, ExtensionConfig};
@@ -21,13 +21,15 @@ use goose::config::{
 };
 use goose::model::ModelConfig;
 use goose::posthog::{get_telemetry_choice, TELEMETRY_ENABLED_KEY};
+use goose::providers::base::ConfigKey;
+use goose::providers::formats::anthropic::supports_adaptive_thinking;
 use goose::providers::provider_test::test_provider_configuration;
 use goose::providers::{create, providers, retry_operation, RetryConfig};
 use goose::session::SessionType;
 use serde_json::Value;
 use std::collections::HashMap;
 
-// useful for light themes where there is no dicernible colour contrast between
+// useful for light themes where there is no discernible colour contrast between
 // cursor-selected and cursor-unselected items.
 const MULTISELECT_VISIBILITY_HINT: &str = "<";
 
@@ -327,8 +329,8 @@ async fn handle_oauth_configuration(provider_name: &str, key_name: &str) -> anyh
     ));
 
     // Create a temporary provider instance to handle OAuth
-    let temp_model = ModelConfig::new("temp")?;
-    match create(provider_name, temp_model).await {
+    let temp_model = ModelConfig::new("temp")?.with_canonical_limits(provider_name);
+    match create(provider_name, temp_model, Vec::new()).await {
         Ok(provider) => match provider.configure_oauth().await {
             Ok(_) => {
                 let _ = cliclack::log::success("OAuth authentication completed successfully!");
@@ -465,13 +467,11 @@ fn select_model_from_list(
                 ),
             );
 
-            if provider_meta.allows_unlisted_models {
-                model_items.push((
-                    UNLISTED_MODEL_KEY.to_string(),
-                    "Enter a model not listed...".to_string(),
-                    "",
-                ));
-            }
+            model_items.push((
+                UNLISTED_MODEL_KEY.to_string(),
+                "Enter a model not listed...".to_string(),
+                "",
+            ));
 
             let selection = cliclack::select("Select a model:")
                 .items(&model_items)
@@ -491,13 +491,11 @@ fn select_model_from_list(
         let mut model_items: Vec<(String, String, &str)> =
             models.iter().map(|m| (m.clone(), m.clone(), "")).collect();
 
-        if provider_meta.allows_unlisted_models {
-            model_items.push((
-                UNLISTED_MODEL_KEY.to_string(),
-                "Enter a model not listed...".to_string(),
-                "",
-            ));
-        }
+        model_items.push((
+            UNLISTED_MODEL_KEY.to_string(),
+            "Enter a model not listed...".to_string(),
+            "",
+        ));
 
         let selection = cliclack::select("Select a model:")
             .items(&model_items)
@@ -541,6 +539,129 @@ fn try_store_secret(config: &Config, key_name: &str, value: String) -> anyhow::R
     }
 }
 
+async fn configure_single_key(
+    config: &Config,
+    provider_name: &str,
+    display_name: &str,
+    key: &ConfigKey,
+) -> anyhow::Result<bool> {
+    let from_env = std::env::var(&key.name).ok();
+
+    match from_env {
+        Some(env_value) => {
+            let _ = cliclack::log::info(format!("{} is set via environment variable", key.name));
+            if cliclack::confirm("Would you like to save this value to your keyring?")
+                .initial_value(true)
+                .interact()?
+            {
+                if key.secret {
+                    if !try_store_secret(config, &key.name, env_value)? {
+                        return Ok(false);
+                    }
+                } else {
+                    config.set_param(&key.name, &env_value)?;
+                }
+                let _ = cliclack::log::info(format!("Saved {} to {}", key.name, config.path()));
+            }
+        }
+        None => {
+            let existing: Result<String, _> = if key.secret {
+                config.get_secret(&key.name)
+            } else {
+                config.get_param(&key.name)
+            };
+
+            match existing {
+                Ok(_) => {
+                    let _ = cliclack::log::info(format!("{} is already configured", key.name));
+                    if cliclack::confirm("Would you like to update this value?").interact()? {
+                        if key.oauth_flow {
+                            handle_oauth_configuration(provider_name, &key.name).await?;
+                        } else {
+                            let value: String = if key.secret {
+                                cliclack::password(format!("Enter new value for {}", key.name))
+                                    .mask('▪')
+                                    .interact()?
+                            } else {
+                                let mut input =
+                                    cliclack::input(format!("Enter new value for {}", key.name));
+                                if key.default.is_some() {
+                                    input = input.default_input(&key.default.clone().unwrap());
+                                }
+                                input.interact()?
+                            };
+
+                            if key.secret {
+                                if !try_store_secret(config, &key.name, value)? {
+                                    return Ok(false);
+                                }
+                            } else {
+                                config.set_param(&key.name, &value)?;
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    if key.oauth_flow {
+                        handle_oauth_configuration(provider_name, &key.name).await?;
+                    } else if !key.required && key.secret {
+                        if cliclack::confirm(format!(
+                            "Would you like to set {}? (optional)",
+                            key.name
+                        ))
+                        .initial_value(true)
+                        .interact()?
+                        {
+                            let value: String =
+                                cliclack::password(format!("Enter value for {}", key.name))
+                                    .mask('▪')
+                                    .interact()?;
+                            if !try_store_secret(config, &key.name, value)? {
+                                return Ok(false);
+                            }
+                        }
+                    } else {
+                        let prompt = if key.required {
+                            format!(
+                                "Provider {} requires {}, please enter a value",
+                                display_name, key.name
+                            )
+                        } else {
+                            format!("Enter {} (optional, press Enter to skip)", key.name)
+                        };
+
+                        let value: String = if key.secret {
+                            cliclack::password(&prompt).mask('▪').interact()?
+                        } else {
+                            let mut input = cliclack::input(&prompt);
+                            if key.default.is_some() {
+                                input = input.default_input(&key.default.clone().unwrap());
+                            }
+                            if !key.required {
+                                input = input.required(false);
+                            }
+                            input.interact()?
+                        };
+
+                        if value.is_empty() {
+                            return Ok(true);
+                        }
+
+                        if key.secret {
+                            if !try_store_secret(config, &key.name, value)? {
+                                return Ok(false);
+                            }
+                        } else {
+                            config.set_param(&key.name, &value)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub async fn configure_provider_dialog() -> anyhow::Result<bool> {
     // Get global config instance
     let config = Config::global();
@@ -565,6 +686,7 @@ pub async fn configure_provider_dialog() -> anyhow::Result<bool> {
     let provider_name = cliclack::select("Which model provider should we use?")
         .initial_value(&default_provider)
         .items(&provider_items)
+        .filter_mode()
         .interact()?;
 
     // Get the selected provider's metadata
@@ -573,107 +695,31 @@ pub async fn configure_provider_dialog() -> anyhow::Result<bool> {
         .find(|(p, _)| &p.name == provider_name)
         .expect("Selected provider must exist in metadata");
 
-    // Configure required provider keys
-    for key in &provider_meta.config_keys {
-        if !key.required {
-            continue;
+    for key in provider_meta
+        .config_keys
+        .iter()
+        .filter(|k| k.primary || k.oauth_flow)
+    {
+        if !configure_single_key(config, provider_name, &provider_meta.display_name, key).await? {
+            return Ok(false);
         }
+    }
 
-        // First check if the value is set via environment variable
-        let from_env = std::env::var(&key.name).ok();
-
-        match from_env {
-            Some(env_value) => {
-                let _ =
-                    cliclack::log::info(format!("{} is set via environment variable", key.name));
-                if cliclack::confirm("Would you like to save this value to your keyring?")
-                    .initial_value(true)
-                    .interact()?
-                {
-                    if key.secret {
-                        if !try_store_secret(config, &key.name, env_value)? {
-                            return Ok(false);
-                        }
-                    } else {
-                        config.set_param(&key.name, &env_value)?;
-                    }
-                    let _ = cliclack::log::info(format!("Saved {} to {}", key.name, config.path()));
-                }
-            }
-            None => {
-                let existing: Result<String, _> = if key.secret {
-                    config.get_secret(&key.name)
-                } else {
-                    config.get_param(&key.name)
-                };
-
-                match existing {
-                    Ok(_) => {
-                        let _ = cliclack::log::info(format!("{} is already configured", key.name));
-                        if cliclack::confirm("Would you like to update this value?").interact()? {
-                            // Check if this key uses OAuth flow
-                            if key.oauth_flow {
-                                handle_oauth_configuration(provider_name, &key.name).await?;
-                            } else {
-                                // Non-OAuth key, use manual entry
-                                let value: String = if key.secret {
-                                    cliclack::password(format!("Enter new value for {}", key.name))
-                                        .mask('▪')
-                                        .interact()?
-                                } else {
-                                    let mut input = cliclack::input(format!(
-                                        "Enter new value for {}",
-                                        key.name
-                                    ));
-                                    if key.default.is_some() {
-                                        input = input.default_input(&key.default.clone().unwrap());
-                                    }
-                                    input.interact()?
-                                };
-
-                                if key.secret {
-                                    if !try_store_secret(config, &key.name, value)? {
-                                        return Ok(false);
-                                    }
-                                } else {
-                                    config.set_param(&key.name, &value)?;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        if key.oauth_flow {
-                            handle_oauth_configuration(provider_name, &key.name).await?;
-                        } else {
-                            // Non-OAuth key, use manual entry
-                            let value: String = if key.secret {
-                                cliclack::password(format!(
-                                    "Provider {} requires {}, please enter a value",
-                                    provider_meta.display_name, key.name
-                                ))
-                                .mask('▪')
-                                .interact()?
-                            } else {
-                                let mut input = cliclack::input(format!(
-                                    "Provider {} requires {}, please enter a value",
-                                    provider_meta.display_name, key.name
-                                ));
-                                if key.default.is_some() {
-                                    input = input.default_input(&key.default.clone().unwrap());
-                                }
-                                input.interact()?
-                            };
-
-                            if key.secret {
-                                if !try_store_secret(config, &key.name, value)? {
-                                    return Ok(false);
-                                }
-                            } else {
-                                config.set_param(&key.name, &value)?;
-                            }
-                        }
-                    }
-                }
+    let non_primary_keys: Vec<_> = provider_meta
+        .config_keys
+        .iter()
+        .filter(|k| !k.primary && !k.oauth_flow)
+        .collect();
+    if !non_primary_keys.is_empty()
+        && cliclack::confirm("Would you like to configure advanced settings?")
+            .initial_value(false)
+            .interact()?
+    {
+        for key in non_primary_keys {
+            if !configure_single_key(config, provider_name, &provider_meta.display_name, key)
+                .await?
+            {
+                return Ok(false);
             }
         }
     }
@@ -681,8 +727,9 @@ pub async fn configure_provider_dialog() -> anyhow::Result<bool> {
     let spin = spinner();
     spin.start("Attempting to fetch supported models...");
     let models_res = {
-        let temp_model_config = ModelConfig::new(&provider_meta.default_model)?;
-        let temp_provider = create(provider_name, temp_model_config).await?;
+        let temp_model_config =
+            ModelConfig::new(&provider_meta.default_model)?.with_canonical_limits(provider_name);
+        let temp_provider = create(provider_name, temp_model_config, Vec::new()).await?;
         retry_operation(&RetryConfig::default(), || async {
             temp_provider.fetch_recommended_models().await
         })
@@ -690,15 +737,15 @@ pub async fn configure_provider_dialog() -> anyhow::Result<bool> {
     };
     spin.stop(style("Model fetch complete").green());
 
-    // Select a model: on fetch error show styled error and abort; if Some(models), show list; if None, free-text input
+    // Select a model: on fetch error show styled error and abort; if models available, show list; otherwise free-text input
     let model: String = match models_res {
         Err(e) => {
             // Provider hook error
             cliclack::outro(style(e.to_string()).on_red().white())?;
             return Ok(false);
         }
-        Ok(Some(models)) => select_model_from_list(&models, provider_meta)?,
-        Ok(None) => {
+        Ok(models) if !models.is_empty() => select_model_from_list(&models, provider_meta)?,
+        Ok(_) => {
             let default_model =
                 std::env::var("GOOSE_MODEL").unwrap_or(provider_meta.default_model.clone());
             cliclack::input("Enter a model from that provider:")
@@ -706,6 +753,61 @@ pub async fn configure_provider_dialog() -> anyhow::Result<bool> {
                 .interact()?
         }
     };
+
+    if model.to_lowercase().starts_with("gemini-3") {
+        let thinking_level: &str = cliclack::select("Select thinking level for Gemini 3:")
+            .item("low", "Low - Better latency, lighter reasoning", "")
+            .item("high", "High - Deeper reasoning, higher latency", "")
+            .interact()?;
+        config.set_gemini3_thinking_level(thinking_level)?;
+    }
+
+    if model.to_lowercase().starts_with("claude-") {
+        let supports_adaptive = supports_adaptive_thinking(&model);
+
+        let mut thinking_select = cliclack::select("Select extended thinking mode for Claude:");
+        if supports_adaptive {
+            thinking_select = thinking_select.item(
+                "adaptive",
+                "Adaptive - Claude decides when and how much to think (recommended)",
+                "",
+            );
+        }
+        thinking_select = thinking_select
+            .item("enabled", "Enabled - Fixed token budget for thinking", "")
+            .item("disabled", "Disabled - No extended thinking", "");
+        if supports_adaptive {
+            thinking_select = thinking_select.initial_value("adaptive");
+        } else {
+            thinking_select = thinking_select.initial_value("disabled");
+        }
+        let thinking_type: &str = thinking_select.interact()?;
+        config.set_claude_thinking_type(thinking_type)?;
+
+        if thinking_type == "adaptive" {
+            let effort: &str = cliclack::select("Select adaptive thinking effort level:")
+                .item("low", "Low - Minimal thinking, fastest responses", "")
+                .item("medium", "Medium - Moderate thinking", "")
+                .item("high", "High - Deep reasoning (default)", "")
+                .item(
+                    "max",
+                    "Max - No constraints on thinking depth (Opus 4.6 only)",
+                    "",
+                )
+                .initial_value("high")
+                .interact()?;
+            config.set_claude_thinking_effort(effort)?;
+        } else if thinking_type == "enabled" {
+            let budget: String = cliclack::input("Enter thinking budget (tokens):")
+                .default_input("16000")
+                .validate(|input: &String| match input.parse::<i32>() {
+                    Ok(n) if n > 0 => Ok(()),
+                    _ => Err("Please enter a valid positive number"),
+                })
+                .interact()?;
+            config.set_claude_thinking_budget(budget.parse::<i32>()?)?;
+        }
+    }
 
     // Test the configuration
     let spin = spinner();
@@ -776,6 +878,7 @@ pub fn toggle_extensions_dialog() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
     )
     .initial_values(enabled_extensions)
+    .filter_mode()
     .interact()?;
 
     // Update enabled status for each extension
@@ -928,24 +1031,35 @@ fn configure_builtin_extension() -> anyhow::Result<()> {
         select = select.item(id, name, desc);
     }
     let extension = select.interact()?.to_string();
-    let timeout = prompt_extension_timeout()?;
-
     let (display_name, description) = extensions
         .iter()
         .find(|(id, _, _)| id == &extension)
         .map(|(_, name, desc)| (name.to_string(), desc.to_string()))
         .unwrap_or_else(|| (extension.clone(), extension.clone()));
 
-    set_extension(ExtensionEntry {
-        enabled: true,
-        config: ExtensionConfig::Builtin {
+    let config = if PLATFORM_EXTENSIONS.contains_key(extension.as_str()) {
+        ExtensionConfig::Platform {
+            name: extension.clone(),
+            description,
+            display_name: Some(display_name),
+            bundled: Some(true),
+            available_tools: Vec::new(),
+        }
+    } else {
+        let timeout = prompt_extension_timeout()?;
+        ExtensionConfig::Builtin {
             name: extension.clone(),
             display_name: Some(display_name),
             timeout: Some(timeout),
             bundled: Some(true),
             description,
             available_tools: Vec::new(),
-        },
+        }
+    };
+
+    set_extension(ExtensionEntry {
+        enabled: true,
+        config,
     });
 
     cliclack::outro(format!("Enabled {} extension", style(extension).green()))?;
@@ -1030,6 +1144,7 @@ fn configure_streamable_http_extension() -> anyhow::Result<()> {
             timeout: Some(timeout),
             bundled: None,
             available_tools: Vec::new(),
+            allowed_headers: Vec::new(),
         },
     });
 
@@ -1114,6 +1229,7 @@ pub fn remove_extension_dialog() -> anyhow::Result<()> {
                 .map(|(name, _)| (name, name.as_str(), MULTISELECT_VISIBILITY_HINT))
                 .collect::<Vec<_>>(),
         )
+        .filter_mode()
         .interact()?;
 
     for name in selected {
@@ -1419,6 +1535,7 @@ pub async fn configure_tool_permissions_dialog() -> anyhow::Result<()> {
                 .map(|ext| (ext.clone(), ext.clone(), ""))
                 .collect::<Vec<_>>(),
         )
+        .filter_mode()
         .interact()?;
 
     let config = Config::global();
@@ -1430,10 +1547,9 @@ pub async fn configure_tool_permissions_dialog() -> anyhow::Result<()> {
     let model: String = config
         .get_goose_model()
         .expect("No model configured. Please set model first");
-    let model_config = ModelConfig::new(&model)?;
+    let model_config = ModelConfig::new(&model)?.with_canonical_limits(&provider_name);
 
     let agent = Agent::new();
-    let new_provider = create(&provider_name, model_config).await?;
 
     let session = agent
         .config
@@ -1445,8 +1561,8 @@ pub async fn configure_tool_permissions_dialog() -> anyhow::Result<()> {
         )
         .await?;
 
-    agent.update_provider(new_provider, &session.id).await?;
-    if let Some(config) = get_extension_by_name(&selected_extension_name) {
+    let extension_config = get_extension_by_name(&selected_extension_name);
+    if let Some(config) = extension_config.as_ref() {
         agent
             .add_extension(config.clone(), &session.id)
             .await
@@ -1465,6 +1581,10 @@ pub async fn configure_tool_permissions_dialog() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+
+    let extensions = extension_config.into_iter().collect::<Vec<_>>();
+    let new_provider = create(&provider_name, model_config, extensions).await?;
+    agent.update_provider(new_provider, &session.id).await?;
 
     let permission_manager = PermissionManager::instance();
     let selected_tools = agent
@@ -1499,6 +1619,7 @@ pub async fn configure_tool_permissions_dialog() -> anyhow::Result<()> {
                 })
                 .collect::<Vec<_>>(),
         )
+        .filter_mode()
         .interact()?;
 
     // Find the selected tool
@@ -1574,7 +1695,7 @@ fn configure_recipe_dialog() -> anyhow::Result<()> {
         .ok()
         .or_else(|| config.get_param(key_name).unwrap_or(None));
     let mut recipe_repo_input = cliclack::input(
-        "Enter your goose recipe Github repo (owner/repo): eg: my_org/goose-recipes",
+        "Enter your goose recipe GitHub repo (owner/repo): eg: my_org/goose-recipes",
     )
     .required(false);
     if let Some(recipe_repo) = default_recipe_repo {
@@ -1646,7 +1767,7 @@ pub async fn handle_openrouter_auth() -> anyhow::Result<()> {
     println!("\nTesting configuration...");
     let configured_model: String = config.get_goose_model()?;
     let model_config = match goose::model::ModelConfig::new(&configured_model) {
-        Ok(config) => config,
+        Ok(config) => config.with_canonical_limits("openrouter"),
         Err(e) => {
             eprintln!("⚠️  Invalid model configuration: {}", e);
             eprintln!("Your settings have been saved. Please check your model configuration.");
@@ -1654,13 +1775,13 @@ pub async fn handle_openrouter_auth() -> anyhow::Result<()> {
         }
     };
 
-    match create("openrouter", model_config).await {
+    match create("openrouter", model_config, Vec::new()).await {
         Ok(provider) => {
-            let model_config = provider.get_model_config();
+            let provider_model_config = provider.get_model_config();
             let test_result = provider
-                .complete_with_model(
-                    None,
-                    &model_config,
+                .complete(
+                    &provider_model_config,
+                    "",
                     "You are goose, an AI assistant.",
                     &[Message::user().with_text("Say 'Configuration test successful!'")],
                     &[],
@@ -1680,12 +1801,11 @@ pub async fn handle_openrouter_auth() -> anyhow::Result<()> {
                     if !has_developer {
                         set_extension(ExtensionEntry {
                             enabled: true,
-                            config: ExtensionConfig::Builtin {
+                            config: ExtensionConfig::Platform {
                                 name: "developer".to_string(),
-                                display_name: Some(goose::config::DEFAULT_DISPLAY_NAME.to_string()),
-                                timeout: Some(goose::config::DEFAULT_EXTENSION_TIMEOUT),
-                                bundled: Some(true),
                                 description: "Developer extension".to_string(),
+                                display_name: Some(goose::config::DEFAULT_DISPLAY_NAME.to_string()),
+                                bundled: Some(true),
                                 available_tools: Vec::new(),
                             },
                         });
@@ -1726,7 +1846,7 @@ pub async fn handle_tetrate_auth() -> anyhow::Result<()> {
     println!("\nTesting configuration...");
     let configured_model: String = config.get_goose_model()?;
     let model_config = match goose::model::ModelConfig::new(&configured_model) {
-        Ok(config) => config,
+        Ok(config) => config.with_canonical_limits("tetrate"),
         Err(e) => {
             eprintln!("⚠️  Invalid model configuration: {}", e);
             eprintln!("Your settings have been saved. Please check your model configuration.");
@@ -1734,7 +1854,7 @@ pub async fn handle_tetrate_auth() -> anyhow::Result<()> {
         }
     };
 
-    match create("tetrate", model_config).await {
+    match create("tetrate", model_config, Vec::new()).await {
         Ok(provider) => {
             let test_result = provider.fetch_supported_models().await;
 
@@ -1750,12 +1870,11 @@ pub async fn handle_tetrate_auth() -> anyhow::Result<()> {
                     if !has_developer {
                         set_extension(ExtensionEntry {
                             enabled: true,
-                            config: ExtensionConfig::Builtin {
+                            config: ExtensionConfig::Platform {
                                 name: "developer".to_string(),
-                                display_name: Some(goose::config::DEFAULT_DISPLAY_NAME.to_string()),
-                                timeout: Some(goose::config::DEFAULT_EXTENSION_TIMEOUT),
-                                bundled: Some(true),
                                 description: "Developer extension".to_string(),
+                                display_name: Some(goose::config::DEFAULT_DISPLAY_NAME.to_string()),
+                                bundled: Some(true),
                                 available_tools: Vec::new(),
                             },
                         });
@@ -1897,12 +2016,7 @@ fn add_provider() -> anyhow::Result<()> {
         .initial_value(true)
         .interact()?;
 
-    // Ask about custom headers for OpenAI compatible providers
-    let headers = if provider_type == "openai_compatible" {
-        collect_custom_headers()?
-    } else {
-        None
-    };
+    let headers = collect_custom_headers()?;
 
     create_custom_provider(CreateCustomProviderParams {
         engine: provider_type.to_string(),
@@ -1913,6 +2027,8 @@ fn add_provider() -> anyhow::Result<()> {
         supports_streaming: Some(supports_streaming),
         headers,
         requires_auth,
+        catalog_provider_id: None,
+        base_path: None,
     })?;
 
     cliclack::outro(format!("Custom provider added: {}", display_name))?;
@@ -1939,6 +2055,7 @@ fn remove_provider() -> anyhow::Result<()> {
 
     let selected_id = cliclack::select("Which custom provider would you like to remove?")
         .items(&provider_items)
+        .filter_mode()
         .interact()?;
 
     remove_custom_provider(selected_id)?;

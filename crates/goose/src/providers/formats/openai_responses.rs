@@ -67,7 +67,7 @@ pub enum ResponseContentBlock {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResponseReasoningInfo {
-    pub effort: String,
+    pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
@@ -168,6 +168,58 @@ pub enum ResponsesStreamEvent {
     },
     #[serde(rename = "error")]
     Error { error: Value },
+    #[serde(rename = "keepalive")]
+    Keepalive {
+        #[serde(default)]
+        sequence_number: Option<i32>,
+    },
+}
+
+fn is_known_responses_stream_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.created"
+            | "response.in_progress"
+            | "response.output_item.added"
+            | "response.content_part.added"
+            | "response.output_text.delta"
+            | "response.output_item.done"
+            | "response.content_part.done"
+            | "response.output_text.done"
+            | "response.completed"
+            | "response.failed"
+            | "response.function_call_arguments.delta"
+            | "response.function_call_arguments.done"
+            | "error"
+            | "keepalive"
+    )
+}
+
+fn parse_responses_stream_event(data_line: &str) -> anyhow::Result<Option<ResponsesStreamEvent>> {
+    let raw_event: Value = serde_json::from_str(data_line).map_err(|e| {
+        anyhow!(
+            "Failed to parse Responses stream event: {}: {:?}",
+            e,
+            data_line
+        )
+    })?;
+
+    let Some(event_type) = raw_event.get("type").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+
+    if !is_known_responses_stream_event_type(event_type) {
+        return Ok(None);
+    }
+
+    let event = serde_json::from_value(raw_event).map_err(|e| {
+        anyhow!(
+            "Failed to parse Responses stream event: {}: {:?}",
+            e,
+            data_line
+        )
+    })?;
+    Ok(Some(event))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -225,59 +277,37 @@ pub enum ContentPart {
     },
 }
 
-fn add_conversation_history(input_items: &mut Vec<Value>, messages: &[Message]) {
+fn add_message_items(input_items: &mut Vec<Value>, messages: &[Message]) {
     for message in messages.iter().filter(|m| m.is_agent_visible()) {
-        let has_only_tool_content = message.content.iter().all(|c| {
-            matches!(
-                c,
-                MessageContent::ToolRequest(_) | MessageContent::ToolResponse(_)
-            )
-        });
-
-        if has_only_tool_content {
-            continue;
-        }
-
-        if message.role != Role::User && message.role != Role::Assistant {
-            continue;
-        }
-
         let role = match message.role {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
 
-        let mut content_items = Vec::new();
+        let mut text_items = Vec::new();
+
         for content in &message.content {
-            if let MessageContent::Text(text) = content {
-                if !text.text.is_empty() {
+            match content {
+                MessageContent::Text(text) if !text.text.is_empty() => {
                     let content_type = if message.role == Role::Assistant {
                         "output_text"
                     } else {
                         "input_text"
                     };
-                    content_items.push(json!({
+                    text_items.push(json!({
                         "type": content_type,
                         "text": text.text
                     }));
                 }
-            }
-        }
+                MessageContent::ToolRequest(request) if message.role == Role::Assistant => {
+                    if !text_items.is_empty() {
+                        input_items.push(json!({
+                            "role": role,
+                            "content": text_items
+                        }));
+                        text_items = Vec::new();
+                    }
 
-        if !content_items.is_empty() {
-            input_items.push(json!({
-                "role": role,
-                "content": content_items
-            }));
-        }
-    }
-}
-
-fn add_function_calls(input_items: &mut Vec<Value>, messages: &[Message]) {
-    for message in messages.iter().filter(|m| m.is_agent_visible()) {
-        if message.role == Role::Assistant {
-            for content in &message.content {
-                if let MessageContent::ToolRequest(request) = content {
                     if let Ok(tool_call) = &request.tool_call {
                         let arguments_str = tool_call
                             .arguments
@@ -300,56 +330,63 @@ fn add_function_calls(input_items: &mut Vec<Value>, messages: &[Message]) {
                         }));
                     }
                 }
-            }
-        }
-    }
-}
+                MessageContent::ToolResponse(response) => {
+                    if !text_items.is_empty() {
+                        input_items.push(json!({
+                            "role": role,
+                            "content": text_items
+                        }));
+                        text_items = Vec::new();
+                    }
 
-fn add_function_call_outputs(input_items: &mut Vec<Value>, messages: &[Message]) {
-    for message in messages {
-        for content in &message.content {
-            if let MessageContent::ToolResponse(response) = content {
-                match &response.tool_result {
-                    Ok(contents) => {
-                        let text_content: Vec<String> = contents
-                            .content
-                            .iter()
-                            .filter_map(|c| {
-                                if let RawContent::Text(t) = c.deref() {
-                                    Some(t.text.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
+                    match &response.tool_result {
+                        Ok(contents) => {
+                            let text_content: Vec<String> = contents
+                                .content
+                                .iter()
+                                .filter_map(|c| {
+                                    if let RawContent::Text(t) = c.deref() {
+                                        Some(t.text.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
 
-                        if !text_content.is_empty() {
+                            if !text_content.is_empty() {
+                                tracing::debug!(
+                                    "Sending function_call_output with call_id: {}",
+                                    response.id
+                                );
+                                input_items.push(json!({
+                                    "type": "function_call_output",
+                                    "call_id": response.id,
+                                    "output": text_content.join("\n")
+                                }));
+                            }
+                        }
+                        Err(error_data) => {
                             tracing::debug!(
-                                "Sending function_call_output with call_id: {}",
+                                "Sending function_call_output error with call_id: {}",
                                 response.id
                             );
                             input_items.push(json!({
                                 "type": "function_call_output",
                                 "call_id": response.id,
-                                "output": text_content.join("\n")
+                                "output": format!("Error: {}", error_data.message)
                             }));
                         }
                     }
-                    Err(error_data) => {
-                        // Handle error responses - must send them back to the API
-                        // to avoid "No tool output found" errors
-                        tracing::debug!(
-                            "Sending function_call_output error with call_id: {}",
-                            response.id
-                        );
-                        input_items.push(json!({
-                            "type": "function_call_output",
-                            "call_id": response.id,
-                            "output": format!("Error: {}", error_data.message)
-                        }));
-                    }
                 }
+                _ => {}
             }
+        }
+
+        if !text_items.is_empty() {
+            input_items.push(json!({
+                "role": role,
+                "content": text_items
+            }));
         }
     }
 }
@@ -372,9 +409,7 @@ pub fn create_responses_request(
         }));
     }
 
-    add_conversation_history(&mut input_items, messages);
-    add_function_calls(&mut input_items, messages);
-    add_function_call_outputs(&mut input_items, messages);
+    add_message_items(&mut input_items, messages);
 
     let mut payload = json!({
         "model": model_config.model_name,
@@ -408,12 +443,10 @@ pub fn create_responses_request(
             .insert("temperature".to_string(), json!(temp));
     }
 
-    if let Some(tokens) = model_config.max_tokens {
-        payload
-            .as_object_mut()
-            .unwrap()
-            .insert("max_output_tokens".to_string(), json!(tokens));
-    }
+    payload.as_object_mut().unwrap().insert(
+        "max_output_tokens".to_string(),
+        json!(model_config.max_output_tokens()),
+    );
 
     Ok(payload)
 }
@@ -588,6 +621,9 @@ where
             if response_str.trim().is_empty() {
                 continue;
             }
+            if response_str.starts_with(':') {
+                continue;
+            }
 
             // Parse SSE format: "event: <type>\ndata: <json>"
             // For now, we only care about the data line
@@ -597,7 +633,7 @@ where
                 // Skip event type lines
                 continue;
             } else {
-                // Try to parse as-is in case there's no prefix
+                // Try to parse as-is when there's no prefix
                 &response_str
             };
 
@@ -605,8 +641,9 @@ where
                 break 'outer;
             }
 
-            let event: ResponsesStreamEvent = serde_json::from_str(data_line)
-                .map_err(|e| anyhow!("Failed to parse Responses stream event: {}: {:?}", e, data_line))?;
+            let Some(event) = parse_responses_stream_event(data_line)? else {
+                continue;
+            };
 
             match event {
                 ResponsesStreamEvent::ResponseCreated { response, .. } |
@@ -700,5 +737,155 @@ where
         } else if let Some(usage) = final_usage {
             yield (None, Some(usage));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conversation::message::MessageContent;
+    use crate::model::ModelConfig;
+    use futures::StreamExt;
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::object;
+
+    #[tokio::test]
+    async fn test_responses_stream_ignores_keepalive_event() -> anyhow::Result<()> {
+        let lines = vec![
+            r#"data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":1737368310,"status":"in_progress","model":"gpt-5.2-pro","output":[]}}"#.to_string(),
+            r#"data: {"type":"keepalive"}"#.to_string(),
+            r#"data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}"#.to_string(),
+            r#"data: {"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"delta":" world"}"#.to_string(),
+            r#"data: {"type":"response.completed","sequence_number":4,"response":{"id":"resp_1","object":"response","created_at":1737368310,"status":"completed","model":"gpt-5.2-pro","output":[],"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}"#.to_string(),
+            "data: [DONE]".to_string(),
+        ];
+
+        let response_stream = tokio_stream::iter(lines.into_iter().map(Ok));
+        let messages = responses_api_to_streaming_message(response_stream);
+        futures::pin_mut!(messages);
+
+        let mut text_parts = Vec::new();
+        let mut usage: Option<ProviderUsage> = None;
+
+        while let Some(item) = messages.next().await {
+            let (message, maybe_usage) = item?;
+            if let Some(msg) = message {
+                for content in msg.content {
+                    if let MessageContent::Text(text) = content {
+                        text_parts.push(text.text.clone());
+                    }
+                }
+            }
+            if let Some(final_usage) = maybe_usage {
+                usage = Some(final_usage);
+            }
+        }
+
+        assert_eq!(text_parts.concat(), "Hello world");
+        let usage = usage.expect("usage should be present at completion");
+        assert_eq!(usage.model, "gpt-5.2-pro");
+        assert_eq!(usage.usage.input_tokens, Some(10));
+        assert_eq!(usage.usage.output_tokens, Some(4));
+        assert_eq!(usage.usage.total_tokens, Some(14));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_responses_stream_error_event_still_returns_error() -> anyhow::Result<()> {
+        let lines = vec![
+            r#"data: {"type":"error","error":{"message":"boom"}}"#.to_string(),
+            "data: [DONE]".to_string(),
+        ];
+
+        let response_stream = tokio_stream::iter(lines.into_iter().map(Ok));
+        let messages = responses_api_to_streaming_message(response_stream);
+        futures::pin_mut!(messages);
+
+        let first = messages
+            .next()
+            .await
+            .expect("stream should emit an error item");
+
+        assert!(first.is_err());
+        assert!(first
+            .expect_err("expected error")
+            .to_string()
+            .contains("Responses API error"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_history_preserves_chronological_order() {
+        let model_config = ModelConfig {
+            model_name: "gpt-5.2-codex".to_string(),
+            context_limit: None,
+            temperature: None,
+            max_tokens: None,
+            toolshim: false,
+            toolshim_model: None,
+            fast_model_config: None,
+            request_params: None,
+            reasoning: None,
+        };
+
+        let messages = vec![
+            Message::assistant()
+                .with_text("I'll create that file.")
+                .with_tool_request(
+                    "call_1",
+                    Ok(CallToolRequestParams {
+                        meta: None,
+                        task: None,
+                        name: "shell".into(),
+                        arguments: Some(object!({"command": "echo hello"})),
+                    }),
+                ),
+            Message::assistant()
+                .with_text("Now let me verify.")
+                .with_tool_request(
+                    "call_2",
+                    Ok(CallToolRequestParams {
+                        meta: None,
+                        task: None,
+                        name: "shell".into(),
+                        arguments: Some(object!({"command": "cat file.txt"})),
+                    }),
+                ),
+        ];
+
+        let result = create_responses_request(&model_config, "", &messages, &[]).unwrap();
+        let input = result["input"].as_array().unwrap();
+
+        let types: Vec<&str> = input
+            .iter()
+            .map(|item| {
+                item.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| item["role"].as_str().unwrap())
+            })
+            .collect();
+
+        assert_eq!(
+            types,
+            vec!["assistant", "function_call", "assistant", "function_call"]
+        );
+    }
+
+    #[test]
+    fn test_deserialize_reasoning_info_with_null_effort() {
+        let json = r#"{"effort": null}"#;
+        let info: ResponseReasoningInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.effort, None);
+        assert_eq!(info.summary, None);
+    }
+
+    #[test]
+    fn test_deserialize_reasoning_info_with_effort() {
+        let json = r#"{"effort": "high", "summary": "Thought deeply"}"#;
+        let info: ResponseReasoningInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.effort.as_deref(), Some("high"));
+        assert_eq!(info.summary.as_deref(), Some("Thought deeply"));
     }
 }

@@ -83,14 +83,14 @@ const PairRouteWrapper = ({
   const [isCreatingSession, setIsCreatingSession] = useState(false);
 
   const resumeSessionId = searchParams.get('resumeSessionId') ?? undefined;
-  const recipeId = searchParams.get('recipeId') ?? undefined;
   const recipeDeeplinkFromConfig = window.appConfig?.get('recipeDeeplink') as string | undefined;
+  const recipeIdFromConfig = window.appConfig?.get('recipeId') as string | undefined;
   const initialMessage = routeState.initialMessage;
 
-  // Create session if we have an initialMessage, recipeId, or recipeDeeplink but no sessionId
+  // Create session if we have an initialMessage, recipeDeeplink, or recipeId but no sessionId
   useEffect(() => {
     if (
-      (initialMessage || recipeId || recipeDeeplinkFromConfig) &&
+      (initialMessage || recipeDeeplinkFromConfig || recipeIdFromConfig) &&
       !resumeSessionId &&
       !isCreatingSession
     ) {
@@ -99,8 +99,8 @@ const PairRouteWrapper = ({
       (async () => {
         try {
           const newSession = await createSession(getInitialWorkingDir(), {
-            recipeId,
             recipeDeeplink: recipeDeeplinkFromConfig,
+            recipeId: recipeIdFromConfig,
             allExtensions: extensionsList,
           });
 
@@ -115,7 +115,6 @@ const PairRouteWrapper = ({
 
           setSearchParams((prev) => {
             prev.set('resumeSessionId', newSession.id);
-            prev.delete('recipeId');
             return prev;
           });
         } catch (error) {
@@ -135,8 +134,8 @@ const PairRouteWrapper = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     initialMessage,
-    recipeId,
     recipeDeeplinkFromConfig,
+    recipeIdFromConfig,
     resumeSessionId,
     setSearchParams,
     extensionsList,
@@ -232,7 +231,7 @@ const ConfigureProvidersRoute = () => {
   const navigate = useNavigate();
 
   return (
-    <div className="w-screen h-screen bg-background-default">
+    <div className="w-screen h-screen bg-background-primary">
       <ProviderSettings
         onClose={() => navigate('/settings', { state: { section: 'models' } })}
         isOnboarding={false}
@@ -249,7 +248,7 @@ const WelcomeRoute = ({ onSelectProvider }: WelcomeRouteProps) => {
   const navigate = useNavigate();
 
   return (
-    <div className="w-screen h-screen bg-background-default">
+    <div className="w-screen h-screen bg-background-primary">
       <ProviderSettings
         onClose={() => {
           navigate('/', { replace: true });
@@ -464,7 +463,7 @@ export function AppInner() {
       if ((isMac ? event.metaKey : event.ctrlKey) && event.key === 'n') {
         event.preventDefault();
         try {
-          window.electron.createChatWindow(undefined, getInitialWorkingDir());
+          window.electron.createChatWindow({ dir: getInitialWorkingDir() });
         } catch (error) {
           console.error('Error creating new window:', error);
         }
@@ -593,7 +592,7 @@ export function AppInner() {
         console.log('[App] Processing initial message from launcher:', initialMessage);
         navigate('/pair', {
           state: {
-            initialMessage,
+            initialMessage: { msg: initialMessage, images: [] },
           },
         });
         setTimeout(() => {
@@ -626,7 +625,7 @@ export function AppInner() {
         toastClassName={() =>
           `relative min-h-16 mb-4 p-2 rounded-lg
                flex justify-between overflow-hidden cursor-pointer
-               text-text-on-accent bg-background-inverse
+               text-text-inverse bg-background-inverse
               `
         }
         style={{ width: '450px' }}
@@ -637,7 +636,7 @@ export function AppInner() {
         pauseOnHover
       />
       <ExtensionInstallModal addExtension={addExtension} setView={setView} />
-      <div className="relative w-screen h-screen overflow-hidden bg-background-muted flex flex-col">
+      <div className="relative w-screen h-screen overflow-hidden bg-background-secondary flex flex-col">
         <div className="titlebar-drag-region" />
         <div style={{ position: 'relative', width: '100%', height: '100%' }}>
           <Routes>

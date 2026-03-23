@@ -7,6 +7,7 @@ import {
 } from './store/extensionOverrides';
 import type { FixedExtensionEntry } from './components/ConfigContext';
 import { AppEvents } from './constants/events';
+import { decodeRecipe, Recipe } from './recipe';
 
 export function shouldShowNewChatTitle(session: Session): boolean {
   if (session.recipe) {
@@ -36,16 +37,16 @@ export function resumeSession(session: Session, setView: setViewType) {
 export async function createSession(
   workingDir: string,
   options?: {
-    recipeId?: string;
     recipeDeeplink?: string;
+    recipeId?: string;
     extensionConfigs?: ExtensionConfig[];
     allExtensions?: FixedExtensionEntry[];
   }
 ): Promise<Session> {
   const body: {
     working_dir: string;
+    recipe?: Recipe;
     recipe_id?: string;
-    recipe_deeplink?: string;
     extension_overrides?: ExtensionConfig[];
   } = {
     working_dir: workingDir,
@@ -54,7 +55,7 @@ export async function createSession(
   if (options?.recipeId) {
     body.recipe_id = options.recipeId;
   } else if (options?.recipeDeeplink) {
-    body.recipe_deeplink = options.recipeDeeplink;
+    body.recipe = await decodeRecipe(options.recipeDeeplink);
   }
 
   if (options?.extensionConfigs && options.extensionConfigs.length > 0) {
@@ -81,14 +82,12 @@ export async function startNewSession(
   setView: setViewType,
   workingDir: string,
   options?: {
-    recipeId?: string;
     recipeDeeplink?: string;
+    recipeId?: string;
     allExtensions?: FixedExtensionEntry[];
   }
 ): Promise<Session> {
   const session = await createSession(workingDir, options);
-
-  // Include session data so sidebar can add it immediately (before it has messages)
   window.dispatchEvent(new CustomEvent(AppEvents.SESSION_CREATED, { detail: { session } }));
 
   const initialMessage = initialText ? { msg: initialText, images: [] } : undefined;

@@ -161,11 +161,23 @@ fn format_messages(messages: &[Message], image_format: &ImageFormat) -> Vec<Data
                                 })
                                 .unwrap_or_else(|| "{}".to_string());
 
-                            converted.tool_calls.get_or_insert_default().push(json!({
+                            let tool_calls = converted.tool_calls.get_or_insert_default();
+                            let mut tool_call_json = json!({
                                 "id": request.id,
                                 "type": "function",
-                                "function": {"name": sanitized_name, "arguments": arguments_str}
-                            }));
+                                "function": {
+                                    "name": sanitized_name,
+                                    "arguments": arguments_str,
+                                }
+                            });
+
+                            if let Some(metadata) = &request.metadata {
+                                for (key, value) in metadata {
+                                    tool_call_json[key] = value.clone();
+                                }
+                            }
+
+                            tool_calls.push(tool_call_json);
                         }
                         Err(e) => {
                             content_array
@@ -193,6 +205,10 @@ fn format_messages(messages: &[Message], image_format: &ImageFormat) -> Vec<Data
                 MessageContent::SystemNotification(_)
                 | MessageContent::ToolConfirmationRequest(_)
                 | MessageContent::ActionRequired(_) => {}
+                MessageContent::Reasoning(_reasoning) => {
+                    // Reasoning content is for OpenAI-compatible APIs (e.g., DeepSeek)
+                    // Databricks doesn't use this format, so skip
+                }
             }
         }
 
@@ -529,14 +545,10 @@ pub fn create_request(
     }
 
     let model_name = model_config.model_name.to_string();
-    let is_o1 = model_name.starts_with("o1") || model_name.starts_with("goose-o1");
-    let is_o3 = model_name.starts_with("o3") || model_name.starts_with("goose-o3");
-    let is_gpt_5 = model_name.starts_with("gpt-5") || model_name.starts_with("goose-gpt-5");
-    let is_openai_reasoning_model = is_o1 || is_o3 || is_gpt_5;
+    let is_openai_reasoning_model = model_config.is_openai_reasoning_model();
     let is_claude_sonnet =
         model_name.contains("claude-3-7-sonnet") || model_name.contains("claude-4-sonnet"); // can be goose- or databricks-
 
-    // Only extract reasoning effort for O1/O3 models
     let (model_name, reasoning_effort) = if is_openai_reasoning_model {
         let parts: Vec<&str> = model_config.model_name.split('-').collect();
         let last_part = parts.last().unwrap();
@@ -552,7 +564,6 @@ pub fn create_request(
             ),
         }
     } else {
-        // For non-O family models, use the model name as is and no reasoning effort
         (model_config.model_name.to_string(), None)
     };
 
@@ -597,19 +608,19 @@ pub fn create_request(
 
     let is_thinking_enabled = std::env::var("CLAUDE_THINKING_ENABLED").is_ok();
     if is_claude_sonnet && is_thinking_enabled {
-        // Minimum budget_tokens is 1024
-        let budget_tokens = std::env::var("CLAUDE_THINKING_BUDGET")
-            .unwrap_or_else(|_| "16000".to_string())
-            .parse()
-            .unwrap_or(16000);
+        // Anthropic requires budget_tokens >= 1024
+        const DEFAULT_THINKING_BUDGET: i32 = 16000;
+        let budget_tokens: i32 = std::env::var("CLAUDE_THINKING_BUDGET")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_THINKING_BUDGET);
 
-        // For Claude models with thinking enabled, we need to add max_tokens + budget_tokens
-        // Default to 8192 (Claude max output) + budget if not specified
-        let max_completion_tokens = model_config.max_tokens.unwrap_or(8192);
-        payload.as_object_mut().unwrap().insert(
-            "max_tokens".to_string(),
-            json!(max_completion_tokens + budget_tokens),
-        );
+        // With thinking enabled, max_tokens must include both output and thinking budget
+        let max_tokens = model_config.max_output_tokens() + budget_tokens;
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("max_tokens".to_string(), json!(max_tokens));
 
         payload.as_object_mut().unwrap().insert(
             "thinking".to_string(),
@@ -634,18 +645,10 @@ pub fn create_request(
             }
         }
 
-        // open ai reasoning models use max_completion_tokens instead of max_tokens
-        if let Some(tokens) = model_config.max_tokens {
-            let key = if is_openai_reasoning_model {
-                "max_completion_tokens"
-            } else {
-                "max_tokens"
-            };
-            payload
-                .as_object_mut()
-                .unwrap()
-                .insert(key.to_string(), json!(tokens));
-        }
+        payload.as_object_mut().unwrap().insert(
+            "max_completion_tokens".to_string(),
+            json!(model_config.max_output_tokens()),
+        );
     }
 
     // Apply cache control for Claude models to enable prompt caching
@@ -1040,8 +1043,9 @@ mod tests {
             max_tokens: Some(1024),
             toolshim: false,
             toolshim_model: None,
-            fast_model: None,
+            fast_model_config: None,
             request_params: None,
+            reasoning: None,
         };
         let request = create_request(&model_config, "system", &[], &[], &ImageFormat::OpenAi)?;
         let obj = request.as_object().unwrap();
@@ -1053,7 +1057,7 @@ mod tests {
                     "content": "system"
                 }
             ],
-            "max_tokens": 1024
+            "max_completion_tokens": 1024
         });
 
         for (key, value) in expected.as_object().unwrap() {
@@ -1072,8 +1076,9 @@ mod tests {
             max_tokens: Some(1024),
             toolshim: false,
             toolshim_model: None,
-            fast_model: None,
+            fast_model_config: None,
             request_params: None,
+            reasoning: None,
         };
         let request = create_request(&model_config, "system", &[], &[], &ImageFormat::OpenAi)?;
         assert_eq!(request["reasoning_effort"], "high");
@@ -1383,6 +1388,39 @@ mod tests {
     }
 
     #[test]
+    fn test_format_messages_with_thought_signature_metadata() -> anyhow::Result<()> {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "thoughtSignature".to_string(),
+            json!("sig_abc123_test_signature"),
+        );
+
+        let message = Message::assistant().with_tool_request_with_metadata(
+            "tool1",
+            Ok(CallToolRequestParams {
+                meta: None,
+                task: None,
+                name: "test_tool".into(),
+                arguments: Some(object!({"param": "value"})),
+            }),
+            Some(&metadata),
+            None,
+        );
+
+        let spec = format_messages(&[message], &ImageFormat::OpenAi);
+        let as_value = serde_json::to_value(spec)?;
+        let spec_array = as_value.as_array().unwrap();
+
+        assert_eq!(spec_array.len(), 1);
+        let tool_call = &spec_array[0]["tool_calls"][0];
+        assert_eq!(tool_call["id"], "tool1");
+        assert_eq!(tool_call["function"]["name"], "test_tool");
+        assert_eq!(tool_call["thoughtSignature"], "sig_abc123_test_signature");
+
+        Ok(())
+    }
+
+    #[test]
     fn test_create_request_claude_has_cache_control() -> anyhow::Result<()> {
         let model_config = ModelConfig {
             model_name: "databricks-claude-sonnet-4".to_string(),
@@ -1391,8 +1429,9 @@ mod tests {
             max_tokens: Some(8192),
             toolshim: false,
             toolshim_model: None,
-            fast_model: None,
+            fast_model_config: None,
             request_params: None,
+            reasoning: None,
         };
 
         let messages = vec![
@@ -1443,8 +1482,9 @@ mod tests {
             max_tokens: Some(4096),
             toolshim: false,
             toolshim_model: None,
-            fast_model: None,
+            fast_model_config: None,
             request_params: None,
+            reasoning: None,
         };
 
         let messages = vec![Message::user().with_text("Hello")];
@@ -1474,6 +1514,47 @@ mod tests {
         // Verify tool does NOT have cache_control
         let tools = request["tools"].as_array().unwrap();
         assert!(tools[0]["function"].get("cache_control").is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_format_messages_with_multiple_metadata_fields() -> anyhow::Result<()> {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("thoughtSignature".to_string(), json!("sig_top_level"));
+        metadata.insert(
+            "extra_content".to_string(),
+            json!({
+                "google": {
+                    "thought_signature": "sig_nested"
+                }
+            }),
+        );
+        metadata.insert("custom_field".to_string(), json!("custom_value"));
+
+        let message = Message::assistant().with_tool_request_with_metadata(
+            "tool1",
+            Ok(CallToolRequestParams {
+                meta: None,
+                task: None,
+                name: "test_tool".into(),
+                arguments: None,
+            }),
+            Some(&metadata),
+            None,
+        );
+
+        let spec = format_messages(&[message], &ImageFormat::OpenAi);
+        let as_value = serde_json::to_value(spec)?;
+        let spec_array = as_value.as_array().unwrap();
+
+        let tool_call = &spec_array[0]["tool_calls"][0];
+        assert_eq!(tool_call["thoughtSignature"], "sig_top_level");
+        assert_eq!(
+            tool_call["extra_content"]["google"]["thought_signature"],
+            "sig_nested"
+        );
+        assert_eq!(tool_call["custom_field"], "custom_value");
 
         Ok(())
     }

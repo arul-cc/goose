@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8"/>
     <meta name="referrer" content="no-referrer"/>
+    <meta name="color-scheme" content="light dark"/>
     <!--
       The Content Security Policy is dynamically created by Rust at request time based on the domains declared in the MCP App's resource metadata.
     -->
@@ -33,7 +34,42 @@
 
         let guestIframe = null;
 
-        function createGuestIframe(html) {
+        /**
+         * Extract the secret and base URL from the current page URL.
+         */
+        function getProxyParams() {
+          var params = new URLSearchParams(window.location.search);
+          return {
+            secret: params.get('secret') || '',
+            baseUrl: window.location.origin
+          };
+        }
+
+        /**
+         * Store guest HTML on the server and get a nonce for retrieval.
+         * This allows the guest iframe to load from a real HTTPS URL
+         * instead of srcdoc (which has about: protocol).
+         */
+        async function storeGuestHtml(html) {
+          var proxyParams = getProxyParams();
+          var response = await fetch(proxyParams.baseUrl + '/mcp-app-guest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              secret: proxyParams.secret,
+              html: html
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error('Failed to store guest HTML: ' + response.status);
+          }
+
+          var data = await response.json();
+          return data.nonce;
+        }
+
+        async function createGuestIframe(html, permissions) {
           if (guestIframe) {
             guestIframe.remove();
           }
@@ -42,12 +78,36 @@
 
           // Sandbox permissions for the Guest UI
           // allow-scripts: needed for the app to run
-          // allow-same-origin: needed for localStorage, cookies, etc.
+          // allow-same-origin: needed for localStorage, cookies, and real URL context
           // allow-forms: needed if the app has forms
           guestIframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
 
-          guestIframe.srcdoc = html;
+          // Build Permission Policy allow attribute from requested permissions
+          // These control access to sensitive browser APIs like camera, microphone, etc.
+          var allowList = [];
+          if (permissions && permissions.camera) allowList.push('camera');
+          if (permissions && permissions.microphone) allowList.push('microphone');
+          if (permissions && permissions.geolocation) allowList.push('geolocation');
+          if (permissions && permissions.clipboardWrite) allowList.push('clipboard-write');
+          if (allowList.length > 0) {
+            guestIframe.setAttribute('allow', allowList.join('; '));
+          }
+
           guestIframe.style.cssText = 'width:100%; height:100%; border:none;';
+
+          // Store the HTML server-side and load via real URL.
+          // This gives the guest iframe a real https:// URL instead of about:srcdoc,
+          // which is required by SDKs (like Square Web Payments) that check
+          // window.location.protocol for secure context verification.
+          try {
+            var nonce = await storeGuestHtml(html);
+            var proxyParams = getProxyParams();
+            guestIframe.src = proxyParams.baseUrl + '/mcp-app-guest?secret=' + encodeURIComponent(proxyParams.secret) + '&nonce=' + encodeURIComponent(nonce);
+          } catch (e) {
+            // Fallback to srcdoc if the store endpoint is not available
+            console.warn('Failed to use /mcp-app-guest endpoint, falling back to srcdoc:', e);
+            guestIframe.srcdoc = html;
+          }
 
           document
             .body
@@ -73,8 +133,9 @@
           if (method === 'ui/notifications/sandbox-resource-ready') {
             var params = data.params || {};
             var html = params.html || '';
+            var permissions = params.permissions || null;
 
-            createGuestIframe(html);
+            createGuestIframe(html, permissions);
             return;
           }
 
@@ -126,7 +187,7 @@
           .parent
           .postMessage({
             jsonrpc: '2.0',
-            method: 'ui/notifications/sandbox-ready',
+            method: 'ui/notifications/sandbox-proxy-ready',
             params: {}
           }, '*');
       })();

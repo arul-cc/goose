@@ -9,28 +9,30 @@ use tokio::pin;
 use tokio_util::io::StreamReader;
 
 use super::api_client::{ApiClient, ApiResponse, AuthMethod};
-use super::base::{
-    ConfigKey, MessageStream, ModelInfo, Provider, ProviderDef, ProviderMetadata, ProviderUsage,
-};
+use super::base::{ConfigKey, MessageStream, ModelInfo, Provider, ProviderDef, ProviderMetadata};
 use super::errors::ProviderError;
 use super::formats::anthropic::{
-    create_request, get_usage, response_to_message, response_to_streaming_message,
+    create_request, response_to_streaming_message, thinking_type, ThinkingType,
 };
+use serde_json::json;
 use super::openai_compatible::handle_status_openai_compat;
 use super::openai_compatible::map_http_error_to_provider_error;
-use super::utils::get_model;
+use super::retry::ProviderRetry;
 use crate::config::declarative_providers::DeclarativeProviderConfig;
 use crate::conversation::message::Message;
 use crate::model::ModelConfig;
-use crate::providers::retry::ProviderRetry;
 use crate::providers::utils::RequestLog;
 use futures::future::BoxFuture;
 use rmcp::model::Tool;
+use std::collections::HashMap;
 
 const ANTHROPIC_PROVIDER_NAME: &str = "anthropic";
 pub const ANTHROPIC_DEFAULT_MODEL: &str = "claude-sonnet-4-5";
 const ANTHROPIC_DEFAULT_FAST_MODEL: &str = "claude-haiku-4-5";
 const ANTHROPIC_KNOWN_MODELS: &[&str] = &[
+    // Claude 4.6 models
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     // Claude 4.5 models with aliases
     "claude-sonnet-4-5",
     "claude-sonnet-4-5-20250929",
@@ -54,12 +56,13 @@ pub struct AnthropicProvider {
     api_client: ApiClient,
     model: ModelConfig,
     supports_streaming: bool,
+    custom_headers: Option<HashMap<String, String>>,
     name: String,
 }
 
 impl AnthropicProvider {
     pub async fn from_env(model: ModelConfig) -> Result<Self> {
-        let model = model.with_fast(ANTHROPIC_DEFAULT_FAST_MODEL.to_string());
+        let model = model.with_fast(ANTHROPIC_DEFAULT_FAST_MODEL, ANTHROPIC_PROVIDER_NAME)?;
 
         let config = crate::config::Config::global();
         let api_key: String = config.get_secret("ANTHROPIC_API_KEY")?;
@@ -79,6 +82,7 @@ impl AnthropicProvider {
             api_client,
             model,
             supports_streaming: true,
+            custom_headers: None,
             name: ANTHROPIC_PROVIDER_NAME.to_string(),
         })
     }
@@ -110,20 +114,52 @@ impl AnthropicProvider {
             api_client = api_client.with_headers(header_map)?;
         }
 
+        let supports_streaming = config.supports_streaming.unwrap_or(true);
+
+        if !supports_streaming {
+            return Err(anyhow::anyhow!(
+                "Anthropic provider does not support non-streaming mode. All Claude models support streaming. \
+                Please remove 'supports_streaming: false' from your provider configuration."
+            ));
+        }
+
         Ok(Self {
             api_client,
             model,
-            supports_streaming: config.supports_streaming.unwrap_or(true),
+            supports_streaming,
+            custom_headers: config.headers,
             name: config.name.clone(),
+        })
+    }
+
+    /// Create an AnthropicProvider with an explicit API key (for per-session provider switching).
+    pub fn from_api_key(model: ModelConfig, api_key: &str) -> Result<Self> {
+        let host = crate::config::Config::global()
+            .get_param("ANTHROPIC_HOST")
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+
+        let auth = AuthMethod::ApiKey {
+            header_name: "x-api-key".to_string(),
+            key: api_key.to_string(),
+        };
+
+        let api_client =
+            ApiClient::new(host, auth)?.with_header("anthropic-version", ANTHROPIC_API_VERSION)?;
+
+        Ok(Self {
+            api_client,
+            model,
+            supports_streaming: true,
+            custom_headers: None,
+            name: ANTHROPIC_PROVIDER_NAME.to_string(),
         })
     }
 
     fn get_conditional_headers(&self) -> Vec<(&str, &str)> {
         let mut headers = Vec::new();
 
-        let is_thinking_enabled = std::env::var("CLAUDE_THINKING_ENABLED").is_ok();
         if self.model.model_name.starts_with("claude-3-7-sonnet-") {
-            if is_thinking_enabled {
+            if thinking_type(&self.model) == ThinkingType::Enabled {
                 headers.push(("anthropic-beta", "output-128k-2025-02-19"));
             }
             headers.push(("anthropic-beta", "token-efficient-tools-2025-02-19"));
@@ -132,6 +168,7 @@ impl AnthropicProvider {
         headers
     }
 
+    #[allow(dead_code)]
     async fn post(
         &self,
         session_id: Option<&str>,
@@ -143,9 +180,16 @@ impl AnthropicProvider {
             request = request.header(key, value)?;
         }
 
+        if let Some(custom_headers) = &self.custom_headers {
+            for (key, value) in custom_headers {
+                request = request.header(key, value)?;
+            }
+        }
+
         Ok(request.api_post(payload).await?)
     }
 
+    #[allow(dead_code)]
     fn anthropic_api_call_result(response: ApiResponse) -> Result<Value, ProviderError> {
         match response.status {
             StatusCode::OK => response.payload.ok_or_else(|| {
@@ -156,9 +200,9 @@ impl AnthropicProvider {
                     if let Some(error_msg) = response
                         .payload
                         .as_ref()
-                        .and_then(|p| p.get("error"))
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
+                        .and_then(|p: &Value| p.get("error"))
+                        .and_then(|e: &Value| e.get("message"))
+                        .and_then(|m: &Value| m.as_str())
                     {
                         let msg = error_msg.to_string();
                         if msg.to_lowercase().contains("too long")
@@ -174,6 +218,35 @@ impl AnthropicProvider {
                 ))
             }
         }
+    }
+
+    async fn get_session_metadata(&self, session_id: Option<&str>) -> Option<Value> {
+        let session_id = session_id?;
+        let session = crate::session::SessionManager::instance()
+            .get_session(session_id, false)
+            .await
+            .ok()?;
+
+        let websocket_headers = session
+            .extension_data
+            .get_extension_state("websocket_headers", "v0")?;
+
+        let user_id = websocket_headers.as_object().and_then(|headers| {
+            headers.iter().find_map(|(k, v)| {
+                if k.eq_ignore_ascii_case("x-cow-security-context") {
+                    v.as_str().and_then(|s| {
+                        serde_json::from_str::<Value>(s).ok().and_then(|json| {
+                            json.get("ID")
+                                .and_then(|e| e.as_str().map(|s| s.to_string()))
+                        })
+                    })
+                } else {
+                    None
+                }
+            })
+        })?;
+
+        Some(json!({ "user_id": user_id }))
     }
 }
 
@@ -194,18 +267,22 @@ impl ProviderDef for AnthropicProvider {
             models,
             ANTHROPIC_DOC_URL,
             vec![
-                ConfigKey::new("ANTHROPIC_API_KEY", true, true, None),
+                ConfigKey::new("ANTHROPIC_API_KEY", true, true, None, true),
                 ConfigKey::new(
                     "ANTHROPIC_HOST",
                     true,
                     false,
                     Some("https://api.anthropic.com"),
+                    false,
                 ),
             ],
         )
     }
 
-    fn from_env(model: ModelConfig) -> BoxFuture<'static, Result<Self::Provider>> {
+    fn from_env(
+        model: ModelConfig,
+        _extensions: Vec<crate::config::ExtensionConfig>,
+    ) -> BoxFuture<'static, Result<Self::Provider>> {
         Box::pin(Self::from_env(model))
     }
 }
@@ -220,43 +297,7 @@ impl Provider for AnthropicProvider {
         self.model.clone()
     }
 
-    #[tracing::instrument(
-        skip(self, model_config, system, messages, tools),
-        fields(model_config, input, output, input_tokens, output_tokens, total_tokens)
-    )]
-    async fn complete_with_model(
-        &self,
-        session_id: Option<&str>,
-        model_config: &ModelConfig,
-        system: &str,
-        messages: &[Message],
-        tools: &[Tool],
-    ) -> Result<(Message, ProviderUsage), ProviderError> {
-        let payload = create_request(model_config, system, messages, tools)?;
-
-        let response = self
-            .with_retry(|| async { self.post(session_id, &payload).await })
-            .await?;
-
-        let json_response = Self::anthropic_api_call_result(response)?;
-
-        let message = response_to_message(&json_response)?;
-        let usage = get_usage(&json_response)?;
-        tracing::debug!("🔍 Anthropic non-streaming parsed usage: input_tokens={:?}, output_tokens={:?}, total_tokens={:?}",
-                usage.input_tokens, usage.output_tokens, usage.total_tokens);
-
-        let response_model = get_model(&json_response);
-        let mut log = RequestLog::start(&self.model, &payload)?;
-        log.write(&json_response, Some(&usage))?;
-        let provider_usage = ProviderUsage::new(response_model, usage);
-        tracing::debug!(
-            "🔍 Anthropic non-streaming returning ProviderUsage: {:?}",
-            provider_usage
-        );
-        Ok((message, provider_usage))
-    }
-
-    async fn fetch_supported_models(&self) -> Result<Option<Vec<String>>, ProviderError> {
+    async fn fetch_supported_models(&self) -> Result<Vec<String>, ProviderError> {
         let response = self.api_client.request(None, "v1/models").api_get().await?;
 
         if response.status != StatusCode::OK {
@@ -267,45 +308,56 @@ impl Provider for AnthropicProvider {
         }
 
         let json = response.payload.unwrap_or_default();
-        let arr = match json.get("data").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
-            None => return Ok(None),
-        };
+        let arr = json.get("data").and_then(|v| v.as_array()).ok_or_else(|| {
+            ProviderError::RequestFailed(
+                "Missing 'data' array in Anthropic models response".to_string(),
+            )
+        })?;
 
         let mut models: Vec<String> = arr
             .iter()
             .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_string))
             .collect();
         models.sort();
-        Ok(Some(models))
+        Ok(models)
     }
 
     async fn stream(
         &self,
+        model_config: &ModelConfig,
         session_id: &str,
         system: &str,
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let mut payload = create_request(&self.model, system, messages, tools)?;
+        let metadata = self.get_session_metadata(Some(session_id)).await;
+        let mut payload = create_request(model_config, system, messages, tools, metadata)?;
         payload
             .as_object_mut()
             .unwrap()
             .insert("stream".to_string(), Value::Bool(true));
 
-        let mut request = self.api_client.request(Some(session_id), "v1/messages");
-        let mut log = RequestLog::start(&self.model, &payload)?;
+        let conditional_headers = self.get_conditional_headers();
+        let mut log = RequestLog::start(model_config, &payload)?;
 
-        for (key, value) in self.get_conditional_headers() {
-            request = request.header(key, value)?;
-        }
-
-        let resp = request.response_post(&payload).await.inspect_err(|e| {
-            let _ = log.error(e);
-        })?;
-        let response = handle_status_openai_compat(resp).await.inspect_err(|e| {
-            let _ = log.error(e);
-        })?;
+        let response = self
+            .with_retry(|| async {
+                let mut request = self.api_client.request(Some(session_id), "v1/messages");
+                for (key, value) in &conditional_headers {
+                    request = request.header(key, value)?;
+                }
+                if let Some(custom_headers) = &self.custom_headers {
+                    for (key, value) in custom_headers {
+                        request = request.header(key, value)?;
+                    }
+                }
+                let resp = request.response_post(&payload).await?;
+                handle_status_openai_compat(resp).await
+            })
+            .await
+            .inspect_err(|e| {
+                let _ = log.error(e);
+            })?;
 
         let stream = response.bytes_stream().map_err(io::Error::other);
 
@@ -321,9 +373,5 @@ impl Provider for AnthropicProvider {
                 yield (message, usage);
             }
         }))
-    }
-
-    fn supports_streaming(&self) -> bool {
-        self.supports_streaming
     }
 }

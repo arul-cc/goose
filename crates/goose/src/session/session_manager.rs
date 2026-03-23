@@ -31,6 +31,7 @@ pub enum SessionType {
     SubAgent,
     Hidden,
     Terminal,
+    Gateway,
 }
 
 impl std::fmt::Display for SessionType {
@@ -41,6 +42,7 @@ impl std::fmt::Display for SessionType {
             SessionType::Hidden => write!(f, "hidden"),
             SessionType::Scheduled => write!(f, "scheduled"),
             SessionType::Terminal => write!(f, "terminal"),
+            SessionType::Gateway => write!(f, "gateway"),
         }
     }
 }
@@ -55,6 +57,7 @@ impl std::str::FromStr for SessionType {
             "hidden" => Ok(SessionType::Hidden),
             "scheduled" => Ok(SessionType::Scheduled),
             "terminal" => Ok(SessionType::Terminal),
+            "gateway" => Ok(SessionType::Gateway),
             _ => Err(anyhow::anyhow!("Invalid session type: {}", s)),
         }
     }
@@ -272,8 +275,32 @@ impl SessionManager {
             .await
     }
 
+    pub async fn create_session_with_id(
+        &self,
+        id: &str,
+        working_dir: PathBuf,
+        name: String,
+        session_type: SessionType,
+    ) -> Result<Session> {
+        self.storage
+            .create_session_with_id(id, working_dir, name, session_type)
+            .await
+    }
+
     pub async fn get_session(&self, id: &str, include_messages: bool) -> Result<Session> {
         self.storage.get_session(id, include_messages).await
+    }
+
+    /// Log SQLite pool stats (temporary diagnostic helper).
+    pub fn log_pool_stats(&self, label: &str) {
+        let pool = &self.storage.pool;
+        println!(
+            "[POOL_STATS] {}: size={}, idle={}, active={}",
+            label,
+            pool.size(),
+            pool.num_idle(),
+            pool.size() - pool.num_idle() as u32,
+        );
     }
 
     pub fn update(&self, id: &str) -> SessionUpdateBuilder<'_> {
@@ -491,10 +518,15 @@ impl SessionStorage {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .busy_timeout(std::time::Duration::from_secs(30))
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
-        SqlitePoolOptions::new().connect_lazy_with(options)
+        let max_connections = std::env::var("GOOSE_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(50);
+
+        SqlitePoolOptions::new().max_connections(max_connections).connect_lazy_with(options)
     }
 
     pub fn new(data_dir: PathBuf) -> Self {
@@ -665,7 +697,7 @@ impl SessionStorage {
     }
 
     async fn import_legacy_session(pool: &Pool<Sqlite>, session: &Session) -> Result<()> {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let recipe_json = match &session.recipe {
             Some(recipe) => Some(serde_json::to_string(recipe)?),
@@ -724,7 +756,7 @@ impl SessionStorage {
     }
 
     async fn run_migrations(pool: &Pool<Sqlite>) -> Result<()> {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let current_version = Self::get_schema_version(&mut tx).await?;
 
@@ -899,7 +931,7 @@ impl SessionStorage {
         session_type: SessionType,
     ) -> Result<Session> {
         let pool = self.pool().await?;
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let today = chrono::Utc::now().format("%Y%m%d").to_string();
         let session = sqlx::query_as(
@@ -925,6 +957,35 @@ impl SessionStorage {
             .bind(&name)
             .bind(session_type.to_string())
             .bind(&*working_dir.to_string_lossy())
+            .fetch_one(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        crate::posthog::emit_session_started();
+        Ok(session)
+    }
+
+    async fn create_session_with_id(
+        &self,
+        id: &str,
+        working_dir: PathBuf,
+        name: String,
+        session_type: SessionType,
+    ) -> Result<Session> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin().await?;
+
+        let session = sqlx::query_as(
+            r#"
+                INSERT INTO sessions (id, name, user_set_name, session_type, working_dir, extension_data)
+                VALUES (?, ?, FALSE, ?, ?, '{}')
+                RETURNING *
+                "#,
+        )
+            .bind(id)
+            .bind(&name)
+            .bind(session_type.to_string())
+            .bind(working_dir.to_string_lossy().as_ref())
             .fetch_one(&mut *tx)
             .await?;
 
@@ -1071,7 +1132,7 @@ impl SessionStorage {
         }
 
         let pool = self.pool().await?;
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
         q = q.bind(&builder.session_id);
         q.execute(&mut *tx).await?;
 
@@ -1082,7 +1143,10 @@ impl SessionStorage {
     async fn get_conversation(&self, session_id: &str) -> Result<Conversation> {
         let pool = self.pool().await?;
         let rows = sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
-            "SELECT role, content_json, created_timestamp, metadata_json, message_id FROM messages WHERE session_id = ? ORDER BY timestamp",
+            // Order by created_timestamp, then by id to break ties. created_timestamp is in seconds,
+            // so messages created in the same second (e.g., tool request and response) need to
+            // maintain their insertion order via the auto-increment id.
+            "SELECT role, content_json, created_timestamp, metadata_json, message_id FROM messages WHERE session_id = ? ORDER BY created_timestamp, id",
         )
             .bind(session_id)
             .fetch_all(pool)
@@ -1116,7 +1180,7 @@ impl SessionStorage {
 
     async fn add_message(&self, session_id: &str, message: &Message) -> Result<()> {
         let pool = self.pool().await?;
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let metadata_json = serde_json::to_string(&message.metadata)?;
 
@@ -1154,7 +1218,7 @@ impl SessionStorage {
         session_id: &str,
         conversation: &Conversation,
     ) -> Result<()> {
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
         sqlx::query("DELETE FROM messages WHERE session_id = ?")
             .bind(session_id)
@@ -1237,7 +1301,7 @@ impl SessionStorage {
 
     async fn delete_session(&self, session_id: &str) -> Result<()> {
         let pool = self.pool().await?;
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let exists =
             sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
@@ -1416,7 +1480,7 @@ impl SessionStorage {
         ) -> crate::conversation::message::MessageMetadata,
     {
         let pool = self.pool().await?;
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let current_metadata_json = sqlx::query_scalar::<_, String>(
             "SELECT metadata_json FROM messages WHERE message_id = ? AND session_id = ?",
@@ -1454,6 +1518,97 @@ mod tests {
     use tempfile::TempDir;
 
     const NUM_CONCURRENT_SESSIONS: i32 = 10;
+
+    async fn run_lock_upgrade_attempt(
+        pool: Pool<Sqlite>,
+        session_id: String,
+        begin_statement: &'static str,
+        worker_id: i32,
+        barrier: Option<Arc<tokio::sync::Barrier>>,
+    ) -> anyhow::Result<()> {
+        let mut tx = pool.begin_with(begin_statement).await?;
+
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+
+        sqlx::query("UPDATE sessions SET total_tokens = ? WHERE id = ?")
+            .bind(worker_id)
+            .bind(&session_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn run_lock_upgrade_race(
+        pool: Pool<Sqlite>,
+        session_id: String,
+        begin_statement: &'static str,
+        use_barrier: bool,
+    ) -> Vec<anyhow::Result<()>> {
+        let barrier = if use_barrier {
+            Some(Arc::new(tokio::sync::Barrier::new(2)))
+        } else {
+            None
+        };
+        let mut handles = Vec::new();
+
+        for worker_id in 0..2 {
+            let pool = pool.clone();
+            let session_id = session_id.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                run_lock_upgrade_attempt(pool, session_id, begin_statement, worker_id, barrier)
+                    .await
+            }));
+        }
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.expect("lock-upgrade task panicked"));
+        }
+        results
+    }
+
+    #[tokio::test]
+    async fn test_begin_immediate_prevents_lock_upgrade_deadlock() {
+        let temp_dir = TempDir::new().unwrap();
+        let session_manager = SessionManager::new(temp_dir.path().to_path_buf());
+
+        let session = session_manager
+            .create_session(
+                PathBuf::from("/tmp/lock-upgrade-test"),
+                "Lock Upgrade Session".to_string(),
+                SessionType::User,
+            )
+            .await
+            .unwrap();
+
+        let pool = session_manager.storage().pool.clone();
+
+        let results = run_lock_upgrade_race(pool.clone(), session.id.clone(), "BEGIN", true).await;
+        assert!(
+            results.iter().any(Result::is_err),
+            "BEGIN (DEFERRED) should cause SQLITE_BUSY when two tasks try to upgrade SHARED → RESERVED"
+        );
+
+        let results = run_lock_upgrade_race(pool, session.id, "BEGIN IMMEDIATE", false).await;
+        assert!(
+            results.iter().all(Result::is_ok),
+            "BEGIN IMMEDIATE should serialize contention without SQLITE_BUSY: {:?}",
+            results
+                .iter()
+                .filter_map(|r| r.as_ref().err().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[tokio::test]
     async fn test_concurrent_session_creation() {

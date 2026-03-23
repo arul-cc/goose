@@ -1,5 +1,5 @@
 {
-  "title": "🎃 Community Content Contributions",
+  "title": "📚 Community Content Contributions",
   "description": "Amazing blog posts, videos, and tutorials created by our community for goose!",
   "lastUpdated": "2025-10-15",
   "hacktoberfestYear": 2025,
@@ -9,7 +9,7 @@
       "title": "Hacktoberfest 2025: Contributing to goose",
       "author": {
         "name": "Tania Chakraborty",
-        "handle": "taniandjerry"
+        "handle": "taniacryptid"
       },
       "type": "blog",
       "url": "https://block.github.io/goose/blog/2025/09/26/hacktoberfest-2025",

@@ -55,15 +55,24 @@ impl ProviderDef for AzureProvider {
             AZURE_OPENAI_KNOWN_MODELS.to_vec(),
             AZURE_DOC_URL,
             vec![
-                ConfigKey::new("AZURE_OPENAI_ENDPOINT", true, false, None),
-                ConfigKey::new("AZURE_OPENAI_DEPLOYMENT_NAME", true, false, None),
-                ConfigKey::new("AZURE_OPENAI_API_VERSION", true, false, Some("2024-10-21")),
-                ConfigKey::new("AZURE_OPENAI_API_KEY", false, true, Some("")),
+                ConfigKey::new("AZURE_OPENAI_ENDPOINT", true, false, None, true),
+                ConfigKey::new("AZURE_OPENAI_DEPLOYMENT_NAME", true, false, None, true),
+                ConfigKey::new(
+                    "AZURE_OPENAI_API_VERSION",
+                    true,
+                    false,
+                    Some("2024-10-21"),
+                    false,
+                ),
+                ConfigKey::new("AZURE_OPENAI_API_KEY", false, true, Some(""), true),
             ],
         )
     }
 
-    fn from_env(model: ModelConfig) -> BoxFuture<'static, Result<Self::Provider>> {
+    fn from_env(
+        model: ModelConfig,
+        _extensions: Vec<crate::config::ExtensionConfig>,
+    ) -> BoxFuture<'static, Result<Self::Provider>> {
         Box::pin(async move {
             let config = crate::config::Config::global();
             let endpoint: String = config.get_param("AZURE_OPENAI_ENDPOINT")?;
@@ -82,11 +91,7 @@ impl ProviderDef for AzureProvider {
             })?;
 
             let auth_provider = AzureAuthProvider { auth };
-            let host = format!(
-                "{}/openai/deployments/{}",
-                endpoint.trim_end_matches('/'),
-                deployment_name
-            );
+            let host = format!("{}/openai", endpoint.trim_end_matches('/'));
             let api_client = ApiClient::new(host, AuthMethod::Custom(Box::new(auth_provider)))?
                 .with_query(vec![("api-version".to_string(), api_version)]);
 
@@ -94,6 +99,7 @@ impl ProviderDef for AzureProvider {
                 AZURE_PROVIDER_NAME.to_string(),
                 api_client,
                 model,
+                format!("deployments/{}/", deployment_name),
             ))
         })
     }

@@ -11,6 +11,7 @@ import { Plus } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../ui/dialog';
 import CustomProviderForm from './modal/subcomponents/forms/CustomProviderForm';
 import { SwitchModelModal } from '../models/subcomponents/SwitchModelModal';
+import { useModelAndProvider } from '../../ModelAndProviderContext';
 import type { View } from '../../../utils/navigationUtils';
 
 const GridLayout = memo(function GridLayout({ children }: { children: React.ReactNode }) {
@@ -37,8 +38,8 @@ const CustomProviderCard = memo(function CustomProviderCard({ onClick }: { onCli
         <div className="flex flex-col items-center justify-center min-h-[200px]">
           <Plus className="w-8 h-8 text-gray-400 mb-2" />
           <div className="text-sm text-gray-600 dark:text-gray-400 text-center">
-            <div>Add</div>
-            <div>Custom Provider</div>
+            <div className="font-medium">Add Provider</div>
+            <div className="text-xs text-gray-500 mt-1">From template or manual setup</div>
           </div>
         </div>
       }
@@ -65,10 +66,13 @@ function ProviderCards({
   const [showCustomProviderModal, setShowCustomProviderModal] = useState(false);
   const [showSwitchModelModal, setShowSwitchModelModal] = useState(false);
   const [switchModelProvider, setSwitchModelProvider] = useState<string | null>(null);
+  const [isActiveProvider, setIsActiveProvider] = useState(false);
+  const { getCurrentModelAndProvider } = useModelAndProvider();
   const [editingProvider, setEditingProvider] = useState<{
     id: string;
     config: DeclarativeProviderConfig;
     isEditable: boolean;
+    providerType: string;
   } | null>(null);
 
   const handleProviderLaunchWithModelSelection = useCallback((provider: ProviderDetails) => {
@@ -92,14 +96,24 @@ function ProviderCards({
             id: provider.name,
             config: result.data.config,
             isEditable: result.data.is_editable,
+            providerType: provider.provider_type,
           });
+
+          // Check if this is the active provider
+          try {
+            const providerModel = await getCurrentModelAndProvider();
+            setIsActiveProvider(provider.name === providerModel.provider);
+          } catch {
+            setIsActiveProvider(false);
+          }
+
           setShowCustomProviderModal(true);
         }
       } else {
         openModal(provider);
       }
     },
-    [openModal]
+    [openModal, getCurrentModelAndProvider]
   );
 
   const handleUpdateCustomProvider = useCallback(
@@ -124,9 +138,26 @@ function ProviderCards({
     [editingProvider, refreshProviders]
   );
 
+  const handleDeleteCustomProvider = useCallback(async () => {
+    if (!editingProvider) return;
+
+    const { removeCustomProvider } = await import('../../../api');
+    await removeCustomProvider({
+      path: { id: editingProvider.id },
+      throwOnError: true,
+    });
+    setShowCustomProviderModal(false);
+    setEditingProvider(null);
+    setIsActiveProvider(false);
+    if (refreshProviders) {
+      refreshProviders();
+    }
+  }, [editingProvider, refreshProviders]);
+
   const handleCloseModal = useCallback(() => {
     setShowCustomProviderModal(false);
     setEditingProvider(null);
+    setIsActiveProvider(false);
   }, []);
 
   const onCloseProviderConfig = useCallback(() => {
@@ -165,11 +196,13 @@ function ProviderCards({
   const handleCreateCustomProvider = useCallback(
     async (data: UpdateCustomProviderRequest) => {
       const { createCustomProvider } = await import('../../../api');
-      await createCustomProvider({ body: data, throwOnError: true });
+      const result = await createCustomProvider({ body: data, throwOnError: true });
+      const providerId = result.data?.replace('Custom provider added - ID: ', '') || null;
       setShowCustomProviderModal(false);
       if (refreshProviders) {
-        refreshProviders();
+        await refreshProviders();
       }
+      setSwitchModelProvider(providerId);
       setShowSwitchModelModal(true);
     },
     [refreshProviders]
@@ -178,8 +211,10 @@ function ProviderCards({
   const providerCards = useMemo(() => {
     // providers needs to be an array
     const providersArray = Array.isArray(providers) ? providers : [];
-    // Sort providers alphabetically by name
-    const sortedProviders = [...providersArray].sort((a, b) => a.name.localeCompare(b.name));
+    // Sort providers alphabetically by display name
+    const sortedProviders = [...providersArray].sort((a, b) =>
+      a.metadata.display_name.localeCompare(b.metadata.display_name)
+    );
     const cards = sortedProviders.map((provider) => (
       <ProviderCard
         key={provider.name}
@@ -204,6 +239,9 @@ function ProviderCards({
     api_key: '',
     models: editingProvider.config.models.map((m) => m.name),
     supports_streaming: editingProvider.config.supports_streaming ?? true,
+    requires_auth: editingProvider.config.requires_auth ?? true,
+    headers: editingProvider.config.headers ?? undefined,
+    catalog_provider_id: editingProvider.config.catalog_provider_id ?? undefined,
   };
 
   const editable = editingProvider ? editingProvider.isEditable : true;
@@ -212,7 +250,7 @@ function ProviderCards({
     <>
       {providerCards}
       <Dialog open={showCustomProviderModal} onOpenChange={handleCloseModal}>
-        <DialogContent className="sm:max-w-[600px]">
+        <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{title}</DialogTitle>
           </DialogHeader>
@@ -221,9 +259,13 @@ function ProviderCards({
             isEditable={editable}
             onSubmit={editingProvider ? handleUpdateCustomProvider : handleCreateCustomProvider}
             onCancel={handleCloseModal}
+            onDelete={
+              editingProvider?.providerType === 'Custom' ? handleDeleteCustomProvider : undefined
+            }
+            isActiveProvider={isActiveProvider}
           />
         </DialogContent>
-      </Dialog>{' '}
+      </Dialog>
       {configuringProvider && (
         <ProviderConfigurationModal
           provider={configuringProvider}

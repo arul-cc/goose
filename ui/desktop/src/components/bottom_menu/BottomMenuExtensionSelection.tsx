@@ -34,18 +34,19 @@ export const BottomMenuExtensionSelection = ({ sessionId }: BottomMenuExtensionS
   const isHubView = !sessionId;
 
   useEffect(() => {
-    const handleSessionLoaded = () => {
-      setTimeout(() => {
-        setRefreshTrigger((prev) => prev + 1);
-      }, 500);
+    setIsSessionExtensionsLoaded(false);
+    setSessionExtensions([]);
+  }, [sessionId]);
+
+  useEffect(() => {
+    const handleExtensionsLoaded = () => {
+      setRefreshTrigger((prev) => prev + 1);
     };
 
-    window.addEventListener(AppEvents.SESSION_CREATED, handleSessionLoaded);
-    window.addEventListener(AppEvents.MESSAGE_STREAM_FINISHED, handleSessionLoaded);
+    window.addEventListener(AppEvents.SESSION_EXTENSIONS_LOADED, handleExtensionsLoaded);
 
     return () => {
-      window.removeEventListener(AppEvents.SESSION_CREATED, handleSessionLoaded);
-      window.removeEventListener(AppEvents.MESSAGE_STREAM_FINISHED, handleSessionLoaded);
+      window.removeEventListener(AppEvents.SESSION_EXTENSIONS_LOADED, handleExtensionsLoaded);
     };
   }, []);
 
@@ -57,8 +58,11 @@ export const BottomMenuExtensionSelection = ({ sessionId }: BottomMenuExtensionS
     };
   }, []);
 
-  // Fetch session-specific extensions or use global defaults
   useEffect(() => {
+    if (refreshTrigger === 0 && !isOpen) {
+      return;
+    }
+
     const fetchExtensions = async () => {
       if (!sessionId) {
         return;
@@ -79,7 +83,6 @@ export const BottomMenuExtensionSelection = ({ sessionId }: BottomMenuExtensionS
       }
     };
 
-    setIsSessionExtensionsLoaded(false);
     fetchExtensions();
   }, [sessionId, isOpen, refreshTrigger]);
 
@@ -229,7 +232,7 @@ export const BottomMenuExtensionSelection = ({ sessionId }: BottomMenuExtensionS
     >
       <DropdownMenuTrigger asChild>
         <button
-          className={`flex items-center [&_svg]:size-4 text-text-default/70 hover:text-text-default hover:scale-100 hover:bg-transparent text-xs cursor-pointer ${allExtensions.length === 0 || (!isHubView && !isSessionExtensionsLoaded) ? 'invisible' : ''}`}
+          className={`flex items-center [&_svg]:size-4 text-text-primary/70 hover:text-text-primary hover:scale-100 hover:bg-transparent text-xs cursor-pointer ${allExtensions.length === 0 || (!isHubView && !isSessionExtensionsLoaded) ? 'invisible' : ''}`}
           title="manage extensions"
         >
           <Puzzle className="mr-1 h-4 w-4" />
@@ -253,7 +256,7 @@ export const BottomMenuExtensionSelection = ({ sessionId }: BottomMenuExtensionS
             className="h-8 text-sm"
             autoFocus
           />
-          <p className="text-xs text-text-default/60 mt-1.5">
+          <p className="text-xs text-text-primary/60 mt-1.5">
             {isHubView ? 'Extensions for new chats' : 'Extensions for this chat session'}
           </p>
         </div>
@@ -263,7 +266,7 @@ export const BottomMenuExtensionSelection = ({ sessionId }: BottomMenuExtensionS
           }`}
         >
           {sortedExtensions.length === 0 ? (
-            <div className="px-2 py-4 text-center text-sm text-text-default/70">
+            <div className="px-2 py-4 text-center text-sm text-text-primary/70">
               {searchQuery ? 'no extensions found' : 'no extensions available'}
             </div>
           ) : (
@@ -272,13 +275,13 @@ export const BottomMenuExtensionSelection = ({ sessionId }: BottomMenuExtensionS
               return (
                 <div
                   key={ext.name}
-                  className={`flex items-center justify-between px-2 py-2 hover:bg-background-hover transition-all duration-300 ${
+                  className={`flex items-center justify-between px-2 py-2 transition-all duration-300 ${
                     isToggling ? 'cursor-wait opacity-70' : 'cursor-pointer'
                   }`}
                   onClick={() => !isToggling && handleToggle(ext)}
                   title={ext.description || ext.name}
                 >
-                  <div className="text-sm font-medium text-text-default">
+                  <div className="text-sm font-medium text-text-primary">
                     {formatExtensionName(ext.name)}
                   </div>
                   <div onClick={(e) => e.stopPropagation()}>

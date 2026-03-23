@@ -34,8 +34,8 @@
 - Async/await misuse or blocking operations in async contexts
 - Improper trait implementations
 
-### No Prerelease Docs
-- If the PR contains both code changes to features/functionality AND updates in `/documentation`: Documentation updates must be separated to keep public docs in sync with released versions. Either mark new topics with `unlisted: true` or remove/hide the documentation.
+### No Doc Updates with Code Changes
+- PRs with code changes shouldn't update `/documentation` - docs deploy on merge, code on release. Use `unlisted: true` or remove/hide docs.
 
 ## Project-Specific Context
 
@@ -56,7 +56,7 @@
 **Rust checks:**
 - `cargo fmt --check` - Code formatting (rustfmt)
 - `cargo test --jobs 2` - All tests
-- `./scripts/clippy-lint.sh` - Linting (clippy)
+- `cargo clippy --all-targets -- -D warnings` - Linting (clippy)
 - `just check-openapi-schema` - OpenAPI schema validation
 
 **Desktop app checks:**
@@ -76,7 +76,7 @@
 
 Do not comment on:
 - **Style/formatting** - CI handles this (rustfmt, prettier)
-- **Clippy warnings** - CI handles this (clippy-lint.sh)
+- **Clippy warnings** - CI handles this (clippy)
 - **Test failures** - CI handles this (full test suite)
 - **Missing dependencies** - CI handles this (npm ci will fail)
 - **Minor naming suggestions** - unless truly confusing

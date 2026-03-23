@@ -29,14 +29,14 @@ export default function ExtensionTimeoutField({
       {/* Row with Timeout and timeout input side by side */}
       <div className="flex flex-col">
         <div className="flex-1">
-          <label className="text-sm font-medium mb-2 block text-textStandard">Timeout</label>
+          <label className="text-sm font-medium mb-2 block text-text-primary">Timeout</label>
         </div>
 
         <Input
           value={timeout}
           onChange={(e) => onChange('timeout', e.target.value)}
           defaultValue={300}
-          className={`${!submitAttempted || isTimeoutValid() ? 'border-borderSubtle' : 'border-red-500'} text-textStandard focus:border-borderStandard`}
+          className={`${!submitAttempted || isTimeoutValid() ? 'border-border-primary' : 'border-red-500'} text-text-primary focus:border-border-primary`}
         />
         {submitAttempted && !isTimeoutValid() && (
           <div className="absolute text-xs text-red-500 mt-1">Timeout </div>

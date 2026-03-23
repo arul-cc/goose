@@ -53,13 +53,13 @@ function findDocFile(partialPath: string): string | null {
 function getDocChunk(
   filePath: string,
   startLine: number = 0,
-  lineCount: number = 100,
+  lineCount: number = 1500,
 ): { fileName: string; content: string; webUrl: string } {
   const docsDir = path.resolve(getDocsDir());
   const fullPath = path.join(docsDir, filePath);
 
   const normalizedPath = path.resolve(fullPath);
-  if (!normalizedPath.startsWith(docsDir)) {
+  if (!normalizedPath.startsWith(docsDir + "/")) {
     throw new Error("Invalid file path - directory traversal not allowed");
   }
 
@@ -94,7 +94,7 @@ function getDocChunk(
 export function viewDocs(
   filePaths: string | string[],
   startLine: number = 0,
-  lineCount: number = 100,
+  lineCount: number = 1500,
 ): string {
   const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
 

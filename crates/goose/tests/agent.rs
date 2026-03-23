@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
-use goose::agents::{Agent, AgentEvent};
+use goose::agents::{Agent, AgentEvent, GoosePlatform};
 use goose::config::extensions::{set_extension, ExtensionEntry};
 
 #[cfg(test)]
@@ -128,6 +128,8 @@ mod tests {
                 permission_manager,
                 Some(mock_scheduler),
                 GooseMode::Auto,
+                false,
+                GoosePlatform::GooseCli,
             );
             let agent = Agent::with_config(config);
 
@@ -168,6 +170,8 @@ mod tests {
                 permission_manager,
                 Some(mock_scheduler),
                 GooseMode::Auto,
+                false,
+                GoosePlatform::GooseCli,
             );
             let agent = Agent::with_config(config);
 
@@ -221,6 +225,8 @@ mod tests {
                 permission_manager,
                 Some(mock_scheduler),
                 GooseMode::Auto,
+                false,
+                GoosePlatform::GooseCli,
             );
             let agent = Agent::with_config(config);
 
@@ -337,7 +343,8 @@ mod tests {
         use goose::conversation::message::{Message, MessageContent};
         use goose::model::ModelConfig;
         use goose::providers::base::{
-            Provider, ProviderDef, ProviderMetadata, ProviderUsage, Usage,
+            stream_from_single_message, MessageStream, Provider, ProviderDef, ProviderMetadata,
+            ProviderUsage, Usage,
         };
         use goose::providers::errors::ProviderError;
         use goose::session::session_manager::SessionType;
@@ -365,12 +372,12 @@ mod tests {
                     known_models: vec![],
                     model_doc_link: "".to_string(),
                     config_keys: vec![],
-                    allows_unlisted_models: false,
                 }
             }
 
             fn from_env(
                 _model: ModelConfig,
+                _extensions: Vec<goose::config::ExtensionConfig>,
             ) -> futures::future::BoxFuture<'static, anyhow::Result<Self>> {
                 Box::pin(async { Ok(Self::new()) })
             }
@@ -378,13 +385,14 @@ mod tests {
 
         #[async_trait]
         impl Provider for MockToolProvider {
-            async fn complete(
+            async fn stream(
                 &self,
+                _model_config: &ModelConfig,
                 _session_id: &str,
                 _system_prompt: &str,
                 _messages: &[Message],
                 _tools: &[Tool],
-            ) -> Result<(Message, ProviderUsage), ProviderError> {
+            ) -> Result<MessageStream, ProviderError> {
                 let tool_call = CallToolRequestParams {
                     meta: None,
                     task: None,
@@ -398,21 +406,7 @@ mod tests {
                     Usage::new(Some(10), Some(5), Some(15)),
                 );
 
-                Ok((message, usage))
-            }
-
-            async fn complete_with_model(
-                &self,
-                session_id: Option<&str>,
-                _model_config: &ModelConfig,
-                system_prompt: &str,
-                messages: &[Message],
-                tools: &[Tool],
-            ) -> anyhow::Result<(Message, ProviderUsage), ProviderError> {
-                // Test-only: coerce missing session_id to empty so complete() can be reused.
-                let session_id = session_id.unwrap_or("");
-                self.complete(session_id, system_prompt, messages, tools)
-                    .await
+                Ok(stream_from_single_message(message, usage))
             }
 
             fn get_model_config(&self) -> ModelConfig {
@@ -506,7 +500,7 @@ mod tests {
     mod extension_manager_tests {
         use super::*;
         use goose::agents::extension::ExtensionConfig;
-        use goose::agents::extension_manager_extension::{
+        use goose::agents::platform_extensions::{
             MANAGE_EXTENSIONS_TOOL_NAME, SEARCH_AVAILABLE_EXTENSIONS_TOOL_NAME,
         };
         use goose::agents::AgentConfig;
@@ -541,6 +535,8 @@ mod tests {
                 PermissionManager::instance(),
                 None,
                 GooseMode::Auto,
+                false,
+                GoosePlatform::GooseCli,
             );
 
             let agent = Agent::with_config(config);

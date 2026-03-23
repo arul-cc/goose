@@ -6,51 +6,55 @@ import { Input } from '../../ui/input';
 import { Button } from '../../ui/button';
 import { trackSettingToggled } from '../../../utils/analytics';
 import { LocalModelManager } from './LocalModelManager';
+import { DICTATION_ALLOWED_PROVIDERS } from '../../../updates';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from '../../ui/dropdown-menu';
 
 export const DictationSettings = () => {
   const [provider, setProvider] = useState<DictationProvider | null>(null);
-  const [showProviderDropdown, setShowProviderDropdown] = useState(false);
   const [providerStatuses, setProviderStatuses] = useState<Record<string, DictationProviderStatus>>(
     {}
   );
   const [apiKey, setApiKey] = useState('');
   const [isEditingKey, setIsEditingKey] = useState(false);
-  const [keyValidationError, setKeyValidationError] = useState('');
   const { read, upsert, remove } = useConfig();
+
+  const refreshStatuses = async () => {
+    const audioConfig = await getDictationConfig();
+    setProviderStatuses(audioConfig.data || {});
+  };
 
   useEffect(() => {
     const loadSettings = async () => {
       const providerValue = await read('voice_dictation_provider', false);
-      const loadedProvider: DictationProvider | null = (providerValue as DictationProvider) || null;
-      setProvider(loadedProvider);
+      let loadedProvider: DictationProvider | null = (providerValue as DictationProvider) || null;
 
-      const audioConfig = await getDictationConfig();
-      setProviderStatuses(audioConfig.data || {});
+      if (
+        DICTATION_ALLOWED_PROVIDERS &&
+        loadedProvider &&
+        !DICTATION_ALLOWED_PROVIDERS.includes(loadedProvider)
+      ) {
+        loadedProvider = null;
+        await upsert('voice_dictation_provider', '', false);
+      }
+
+      setProvider(loadedProvider);
+      await refreshStatuses();
     };
 
     loadSettings();
-  }, [read]);
+  }, [read, upsert]);
 
-  const saveProvider = async (newProvider: DictationProvider | null) => {
-    console.log('Saving dictation provider to backend config:', newProvider);
+  const handleProviderChange = (value: string) => {
+    const newProvider = value === 'disabled' ? null : (value as DictationProvider);
     setProvider(newProvider);
-    await upsert('voice_dictation_provider', newProvider || '', false);
+    upsert('voice_dictation_provider', newProvider || '', false);
     trackSettingToggled('voice_dictation', newProvider !== null);
-  };
-
-  const handleProviderChange = (newProvider: DictationProvider | null) => {
-    saveProvider(newProvider);
-    setShowProviderDropdown(false);
-  };
-
-  const handleDropdownToggle = async () => {
-    const newShowState = !showProviderDropdown;
-    setShowProviderDropdown(newShowState);
-
-    if (newShowState) {
-      const audioConfig = await getDictationConfig();
-      setProviderStatuses(audioConfig.data || {});
-    }
   };
 
   const handleSaveKey = async () => {
@@ -59,24 +63,13 @@ export const DictationSettings = () => {
     if (!providerConfig || providerConfig.uses_provider_config) return;
 
     const trimmedKey = apiKey.trim();
-    if (!trimmedKey) {
-      setKeyValidationError('API key is required');
-      return;
-    }
+    if (!trimmedKey) return;
 
-    try {
-      const keyName = providerConfig.config_key!;
-      await upsert(keyName, trimmedKey, true);
-      setApiKey('');
-      setKeyValidationError('');
-      setIsEditingKey(false);
-
-      const audioConfig = await getDictationConfig();
-      setProviderStatuses(audioConfig.data || {});
-    } catch (error) {
-      console.error('Error saving API key:', error);
-      setKeyValidationError('Failed to save API key');
-    }
+    const keyName = providerConfig.config_key!;
+    await upsert(keyName, trimmedKey, true);
+    setApiKey('');
+    setIsEditingKey(false);
+    await refreshStatuses();
   };
 
   const handleRemoveKey = async () => {
@@ -84,82 +77,58 @@ export const DictationSettings = () => {
     const providerConfig = providerStatuses[provider];
     if (!providerConfig || providerConfig.uses_provider_config) return;
 
-    try {
-      const keyName = providerConfig.config_key!;
-      await remove(keyName, true);
-      setApiKey('');
-      setKeyValidationError('');
-      setIsEditingKey(false);
-
-      const audioConfig = await getDictationConfig();
-      setProviderStatuses(audioConfig.data || {});
-    } catch (error) {
-      console.error('Error removing API key:', error);
-      setKeyValidationError('Failed to remove API key');
-    }
+    const keyName = providerConfig.config_key!;
+    await remove(keyName, true);
+    setApiKey('');
+    setIsEditingKey(false);
+    await refreshStatuses();
   };
 
   const handleCancelEdit = () => {
     setApiKey('');
-    setKeyValidationError('');
     setIsEditingKey(false);
   };
 
-  const getProviderLabel = (provider: DictationProvider | null): string => {
-    if (!provider) return 'Disabled';
-    return provider.charAt(0).toUpperCase() + provider.slice(1);
+  const getProviderLabel = (p: DictationProvider | null): string => {
+    if (!p) return 'Disabled';
+    return p.charAt(0).toUpperCase() + p.slice(1);
   };
+
+  const visibleProviders = (Object.keys(providerStatuses) as DictationProvider[]).filter(
+    (p) => !DICTATION_ALLOWED_PROVIDERS || DICTATION_ALLOWED_PROVIDERS.includes(p)
+  );
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between py-2 px-2 hover:bg-background-muted rounded-lg transition-all">
+      <div className="flex items-center justify-between py-2 px-2 hover:bg-background-secondary rounded-lg transition-all">
         <div>
-          <h3 className="text-text-default">Voice Dictation Provider</h3>
-          <p className="text-xs text-text-muted max-w-md mt-[2px]">
+          <h3 className="text-text-primary">Voice Dictation Provider</h3>
+          <p className="text-xs text-text-secondary max-w-md mt-[2px]">
             Choose how voice is converted to text
           </p>
         </div>
-        <div className="relative">
-          <button
-            onClick={handleDropdownToggle}
-            className="flex items-center gap-2 px-3 py-1.5 text-sm border border-border-subtle rounded-md hover:border-border-default transition-colors text-text-default bg-background-default"
-          >
+        <DropdownMenu onOpenChange={(open) => open && refreshStatuses()}>
+          <DropdownMenuTrigger className="flex items-center gap-2 px-3 py-1.5 text-sm border border-border-primary rounded-md hover:border-border-primary transition-colors text-text-primary bg-background-primary">
             {getProviderLabel(provider)}
             <ChevronDown className="w-4 h-4" />
-          </button>
-
-          {showProviderDropdown && (
-            <div className="absolute right-0 mt-1 w-max min-w-[250px] max-w-[350px] bg-background-default border border-border-default rounded-md shadow-lg z-50">
-              <button
-                onClick={() => handleProviderChange(null)}
-                className="w-full px-3 py-2 text-left text-sm transition-colors hover:bg-background-subtle text-text-default whitespace-nowrap first:rounded-t-md"
-              >
-                <span className="flex items-center justify-between gap-2">
-                  <span>Disabled</span>
-                  {provider === null && <span>✓</span>}
-                </span>
-              </button>
-
-              {(Object.keys(providerStatuses) as DictationProvider[]).map((p) => (
-                <button
-                  key={p}
-                  onClick={() => handleProviderChange(p)}
-                  className="w-full px-3 py-2 text-left text-sm transition-colors hover:bg-background-subtle text-text-default whitespace-nowrap last:rounded-b-md"
-                >
-                  <span className="flex items-center justify-between gap-2">
-                    <span>
-                      {getProviderLabel(p)}
-                      {!providerStatuses[p]?.configured && (
-                        <span className="text-xs ml-1 text-text-muted">(not configured)</span>
-                      )}
-                    </span>
-                    {provider === p && <span>✓</span>}
-                  </span>
-                </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-max min-w-[250px] max-w-[350px]">
+            <DropdownMenuRadioGroup
+              value={provider ?? 'disabled'}
+              onValueChange={handleProviderChange}
+            >
+              <DropdownMenuRadioItem value="disabled">Disabled</DropdownMenuRadioItem>
+              {visibleProviders.map((p) => (
+                <DropdownMenuRadioItem key={p} value={p}>
+                  {getProviderLabel(p)}
+                  {!providerStatuses[p]?.configured && (
+                    <span className="text-xs ml-1 text-text-secondary">(not configured)</span>
+                  )}
+                </DropdownMenuRadioItem>
               ))}
-            </div>
-          )}
-        </div>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {provider && providerStatuses[provider] && (
@@ -169,9 +138,9 @@ export const DictationSettings = () => {
               <LocalModelManager />
             </div>
           ) : providerStatuses[provider].uses_provider_config ? (
-            <div className="py-2 px-2 bg-background-subtle rounded-lg">
+            <div className="py-2 px-2 bg-background-secondary rounded-lg">
               {!providerStatuses[provider].configured ? (
-                <p className="text-xs text-text-muted">
+                <p className="text-xs text-text-secondary">
                   Configure the API key in <b>{providerStatuses[provider].settings_path}</b>
                 </p>
               ) : (
@@ -181,10 +150,10 @@ export const DictationSettings = () => {
               )}
             </div>
           ) : (
-            <div className="py-2 px-2 bg-background-subtle rounded-lg">
+            <div className="py-2 px-2 bg-background-secondary rounded-lg">
               <div className="mb-2">
-                <h4 className="text-text-default text-sm">API Key</h4>
-                <p className="text-xs text-text-muted mt-[2px]">
+                <h4 className="text-text-primary text-sm">API Key</h4>
+                <p className="text-xs text-text-secondary mt-[2px]">
                   Required for transcription
                   {providerStatuses[provider]?.configured && (
                     <span className="text-green-600 ml-2">(Configured)</span>
@@ -193,25 +162,26 @@ export const DictationSettings = () => {
               </div>
 
               {!isEditingKey ? (
-                <Button variant="outline" size="sm" onClick={() => setIsEditingKey(true)}>
-                  {providerStatuses[provider]?.configured ? 'Update API Key' : 'Add API Key'}
-                </Button>
+                <div className="flex gap-2 flex-wrap">
+                  <Button variant="outline" size="sm" onClick={() => setIsEditingKey(true)}>
+                    {providerStatuses[provider]?.configured ? 'Update API Key' : 'Add API Key'}
+                  </Button>
+                  {providerStatuses[provider]?.configured && (
+                    <Button variant="destructive" size="sm" onClick={handleRemoveKey}>
+                      Remove API Key
+                    </Button>
+                  )}
+                </div>
               ) : (
                 <div className="space-y-2">
                   <Input
                     type="password"
                     value={apiKey}
-                    onChange={(e) => {
-                      setApiKey(e.target.value);
-                      if (keyValidationError) setKeyValidationError('');
-                    }}
+                    onChange={(e) => setApiKey(e.target.value)}
                     placeholder="Enter your API key"
                     className="max-w-md"
                     autoFocus
                   />
-                  {keyValidationError && (
-                    <p className="text-xs text-red-600 mt-1">{keyValidationError}</p>
-                  )}
                   <div className="flex gap-2">
                     <Button size="sm" onClick={handleSaveKey}>
                       Save
@@ -219,11 +189,6 @@ export const DictationSettings = () => {
                     <Button variant="outline" size="sm" onClick={handleCancelEdit}>
                       Cancel
                     </Button>
-                    {providerStatuses[provider]?.configured && (
-                      <Button variant="destructive" size="sm" onClick={handleRemoveKey}>
-                        Remove
-                      </Button>
-                    )}
                   </div>
                 </div>
               )}

@@ -6,8 +6,10 @@ pub mod azureauth;
 pub mod base;
 pub mod bedrock;
 pub mod canonical;
+pub mod catalog;
 pub mod chatgpt_codex;
 pub mod claude_code;
+pub(crate) mod cli_common;
 pub mod codex;
 pub mod cursor_agent;
 pub mod databricks;
@@ -22,6 +24,7 @@ pub mod google;
 mod init;
 pub mod lead_worker;
 pub mod litellm;
+pub mod local_inference;
 pub mod oauth;
 pub mod ollama;
 pub mod openai;
@@ -41,6 +44,7 @@ pub mod venice;
 pub mod xai;
 
 pub use init::{
-    create, create_with_default_model, create_with_named_model, providers, refresh_custom_providers,
+    create, create_with_api_key, create_with_default_model, create_with_named_model, providers,
+    refresh_custom_providers,
 };
 pub use retry::{retry_operation, RetryConfig};

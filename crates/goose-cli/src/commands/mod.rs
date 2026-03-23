@@ -1,5 +1,5 @@
-pub mod bench;
 pub mod configure;
+pub mod gateway;
 pub mod info;
 pub mod project;
 pub mod recipe;

@@ -4,15 +4,15 @@ use goose::agents::ExtensionConfig;
 use goose::config::permission::PermissionLevel;
 use goose::config::ExtensionEntry;
 use goose::conversation::Conversation;
-use goose::dictation::download_manager::{DownloadProgress, DownloadStatus};
+use goose::download_manager::{DownloadProgress, DownloadStatus};
 use goose::model::ModelConfig;
-use goose::permission::permission_confirmation::PrincipalType;
+use goose::permission::permission_confirmation::{Permission, PrincipalType};
 use goose::providers::base::{ConfigKey, ModelInfo, ProviderMetadata, ProviderType};
 use goose::session::{Session, SessionInsights, SessionType, SystemInfo};
 use rmcp::model::{
     Annotations, Content, EmbeddedResource, Icon, ImageContent, JsonObject, RawAudioContent,
     RawEmbeddedResource, RawImageContent, RawResource, RawTextContent, ResourceContents, Role,
-    TextContent, Tool, ToolAnnotations,
+    TaskSupport, TextContent, Tool, ToolAnnotations, ToolExecution,
 };
 use utoipa::{OpenApi, ToSchema};
 
@@ -21,8 +21,9 @@ use goose::config::declarative_providers::{
 };
 use goose::conversation::message::{
     ActionRequired, ActionRequiredData, FrontendToolRequest, Message, MessageContent,
-    MessageMetadata, RedactedThinkingContent, SystemNotificationContent, SystemNotificationType,
-    ThinkingContent, TokenState, ToolConfirmationRequest, ToolRequest, ToolResponse,
+    MessageMetadata, ReasoningContent, RedactedThinkingContent, SystemNotificationContent,
+    SystemNotificationType, ThinkingContent, TokenState, ToolConfirmationRequest, ToolRequest,
+    ToolResponse,
 };
 
 use crate::routes::recipe_utils::RecipeManifest;
@@ -319,6 +320,8 @@ derive_utoipa!(RawEmbeddedResource as RawEmbeddedResourceSchema);
 derive_utoipa!(RawResource as RawResourceSchema);
 derive_utoipa!(Tool as ToolSchema);
 derive_utoipa!(ToolAnnotations as ToolAnnotationsSchema);
+derive_utoipa!(ToolExecution as ToolExecutionSchema);
+derive_utoipa!(TaskSupport as TaskSupportSchema);
 derive_utoipa!(Annotations as AnnotationsSchema);
 derive_utoipa!(ResourceContents as ResourceContentsSchema);
 derive_utoipa!(JsonObject as JsonObjectSchema);
@@ -351,10 +354,12 @@ derive_utoipa!(Icon as IconSchema);
         super::routes::config_management::get_custom_provider,
         super::routes::config_management::update_custom_provider,
         super::routes::config_management::remove_custom_provider,
+        super::routes::config_management::get_provider_catalog,
+        super::routes::config_management::get_provider_catalog_template,
         super::routes::config_management::check_provider,
         super::routes::config_management::set_config_provider,
         super::routes::config_management::configure_provider_oauth,
-        super::routes::config_management::get_pricing,
+        super::routes::config_management::get_canonical_model_info,
         super::routes::prompts::get_prompts,
         super::routes::prompts::get_prompt,
         super::routes::prompts::save_prompt,
@@ -377,6 +382,7 @@ derive_utoipa!(Icon as IconSchema);
         super::routes::action_required::confirm_tool_action,
         super::routes::reply::reply,
         super::routes::session::list_sessions,
+        super::routes::session::search_sessions,
         super::routes::session::get_session,
         super::routes::session::get_session_insights,
         super::routes::session::update_session_name,
@@ -420,6 +426,15 @@ derive_utoipa!(Icon as IconSchema);
         super::routes::dictation::get_download_progress,
         super::routes::dictation::cancel_download,
         super::routes::dictation::delete_model,
+        super::routes::local_inference::list_local_models,
+        super::routes::local_inference::search_hf_models,
+        super::routes::local_inference::get_repo_files,
+        super::routes::local_inference::download_hf_model,
+        super::routes::local_inference::get_local_model_download_progress,
+        super::routes::local_inference::cancel_local_model_download,
+        super::routes::local_inference::delete_local_model,
+        super::routes::local_inference::get_model_settings,
+        super::routes::local_inference::update_model_settings,
     ),
     components(schemas(
         super::routes::config_management::UpsertConfigQuery,
@@ -437,11 +452,15 @@ derive_utoipa!(Icon as IconSchema);
         super::routes::config_management::ToolPermission,
         super::routes::config_management::UpsertPermissionsQuery,
         super::routes::config_management::UpdateCustomProviderRequest,
+        goose::providers::catalog::ProviderCatalogEntry,
+        goose::providers::catalog::ProviderTemplate,
+        goose::providers::catalog::ModelTemplate,
+        goose::providers::catalog::ModelCapabilities,
         super::routes::config_management::CheckProviderRequest,
         super::routes::config_management::SetProviderRequest,
-        super::routes::config_management::PricingQuery,
-        super::routes::config_management::PricingResponse,
-        super::routes::config_management::PricingData,
+        super::routes::config_management::ModelInfoQuery,
+        super::routes::config_management::ModelInfoResponse,
+        super::routes::config_management::ModelInfoData,
         super::routes::prompts::PromptsListResponse,
         super::routes::prompts::PromptContentResponse,
         super::routes::prompts::SavePromptRequest,
@@ -477,6 +496,7 @@ derive_utoipa!(Icon as IconSchema);
         ActionRequiredData,
         ThinkingContent,
         RedactedThinkingContent,
+        ReasoningContent,
         FrontendToolRequest,
         ResourceContentsSchema,
         SystemNotificationType,
@@ -496,8 +516,11 @@ derive_utoipa!(Icon as IconSchema);
         RecipeManifest,
         ToolSchema,
         ToolAnnotationsSchema,
+        ToolExecutionSchema,
+        TaskSupportSchema,
         ToolInfo,
         PermissionLevel,
+        Permission,
         PrincipalType,
         ModelInfo,
         ModelConfig,
@@ -576,6 +599,7 @@ derive_utoipa!(Icon as IconSchema);
         goose::goose_apps::WindowProps,
         goose::goose_apps::McpAppResource,
         goose::goose_apps::CspMetadata,
+        goose::goose_apps::PermissionsMetadata,
         goose::goose_apps::UiMetadata,
         goose::goose_apps::ResourceMetadata,
         super::routes::dictation::TranscribeRequest,
@@ -583,6 +607,15 @@ derive_utoipa!(Icon as IconSchema);
         goose::dictation::providers::DictationProvider,
         super::routes::dictation::DictationProviderStatus,
         super::routes::dictation::WhisperModelResponse,
+        super::routes::local_inference::LocalModelResponse,
+        super::routes::local_inference::ModelDownloadStatus,
+        super::routes::local_inference::DownloadModelRequest,
+        goose::providers::local_inference::hf_models::HfModelInfo,
+        goose::providers::local_inference::hf_models::HfGgufFile,
+        goose::providers::local_inference::hf_models::HfQuantVariant,
+        super::routes::local_inference::RepoVariantsResponse,
+        goose::providers::local_inference::local_model_registry::ModelSettings,
+        goose::providers::local_inference::local_model_registry::SamplingConfig,
         DownloadProgress,
         DownloadStatus,
     ))

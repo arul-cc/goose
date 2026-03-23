@@ -45,6 +45,10 @@ Configure goose settings - providers, extensions, etc.
 goose configure
 ```
 
+:::tip Type to Filter
+When selecting from menus in `goose configure`, start typing to filter options in real-time. This works for lists of providers, extensions, and tools.
+:::
+
 ---
 
 #### info [options]
@@ -187,8 +191,9 @@ Start or resume interactive chat sessions.
 - **`-n, --name <name>`**: Give the session a name
 - **`--path <path>`**: Legacy parameter for specifying session by file path
 - **`-r, --resume`**: Resume a previous session
-- **`--fork`**: Create a new duplicate session with copied history. Must be used with `--resume`. Provide `--name` or `--session-id` to fork a specific session. Otherwise forks the most recent session.
+- **`--fork`**: Create a new duplicate session with copied history. Must be used with `--resume`. Provide `--name` or `--session-id` to fork a specific session. Otherwise, forks the most recent session.
 - **`--history`**: Show previous messages when resuming a session
+- **`--container <container_id>`**: Run extensions inside a [Docker container](/docs/tutorials/goose-in-docker#running-extensions-in-docker-containers).
 - **`--debug`**: Enable debug mode to output complete tool responses, detailed parameter values, and full file paths
 - **`--max-tool-repetitions <NUMBER>`**: Set the maximum number of times the same tool can be called consecutively with identical parameters. Helps prevent infinite loops.
 - **`--max-turns <NUMBER>`**: Set the maximum number of turns allowed without user input (default: 1000)
@@ -388,6 +393,7 @@ Execute commands from an instruction file or stdin. Check out the [full guide](/
 - **`-n, --name <name>`**: Name for this run session (e.g. `daily-tasks`)
 - **`-r, --resume`**: Resume from a previous run
 - **`--path <PATH>`**: Path for this run session (e.g. `./playground.jsonl`). Used for legacy file-based session storage.
+- **`--container <container_id>`**: Run extensions [inside a Docker container](/docs/tutorials/goose-in-docker#running-extensions-in-docker-containers).
 - **`--no-session`**: Run goose commands without creating or storing a session file
 
 **Extension Options:**
@@ -711,6 +717,14 @@ The `/t` command controls the syntax highlighting theme for markdown content in 
 - The default theme is `dark`
 - The theme setting is saved to the [configuration file](/docs/guides/config-files) as `GOOSE_CLI_THEME` and persists between sessions
 - The saved configuration can be overridden for the session using the `GOOSE_CLI_THEME` [environment variable](/docs/guides/environment-variables#session-management)
+
+**Custom Syntax Highlighting:**
+
+You can customize the underlying syntax highlighting theme used for code blocks by setting:
+- `GOOSE_CLI_LIGHT_THEME` - Theme used when in light mode (default: "GitHub")
+- `GOOSE_CLI_DARK_THEME` - Theme used when in dark mode (default: "zenburn")
+
+These accept any [bat theme name](https://github.com/sharkdp/bat#adding-new-themes). Popular options include "Dracula", "Nord", "Solarized (light)", "Solarized (dark)", "OneHalfDark", and "Monokai Extended". Run `bat --list-themes` to see all available themes.
 
 :::info
 Syntax highlighting styles only affect the font, not the overall terminal interface. The `light` and `dark` themes have subtle differences in font color and weight.

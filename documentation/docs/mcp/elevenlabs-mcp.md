@@ -14,7 +14,7 @@ import CLIExtensionInstructions from '@site/src/components/CLIExtensionInstructi
 
 This tutorial covers how to add the [ElevenLabs MCP Server](https://github.com/elevenlabs/elevenlabs-mcp) as a goose extension to enable AI-powered voice generation, voice cloning, audio editing, and speech-to-text transcription.
 
-:::tip TLDR
+:::tip Quick Install
 <Tabs groupId="interface">
   <TabItem value="ui" label="goose Desktop" default>
   [Launch the installer](goose://extension?cmd=uvx&arg=elevenlabs-mcp&id=elevenlabs&name=ElevenLabs&description=ElevenLabs%20voice%20synthesis%20server&env=ELEVENLABS_API_KEY)
@@ -79,7 +79,7 @@ By connecting to the ElevenLabs MCP server, goose can transform plain text into 
 
 ### goose Prompt
 
-> Hey goose, create a script for me for my youtube short video, I want there to be two different voices. The first voice should cut me off and be a human narrator style and then switch to a cassual AI tone after I read the prompt. Here's an example of a YT short script I've done in the past: 
+> Hey goose, create a script for me for my youtube short video, I want there to be two different voices. The first voice should cut me off and be a human narrator style and then switch to a casual AI tone after I read the prompt. Here's an example of a YT short script I've done in the past: 
 
 Wait… Within Seconds, goose performed Security Audits Across Multiple Projects?! 🔥
 
@@ -88,7 +88,7 @@ Lets, plug & play to find out how
 Let’s provide goose with the command it needs to connect to the Filesystem MCP server extension…
 
 Now lets play 
-propmt:  "Hey goose, I need to perform a security audit across multiple projects. Let's check for…🔹 Hardcoded Credentials – API keys, passwords, and secrets left in the code.🔹 SQL Injection Risks – Unsafe queries that could expose data.🔹 Insecure Cryptographic Practices – Weak encryption methods that put data at risk.AND🔹 Exposed Config Files – Sensitive information that shouldn't be public.🔹 Outdated Dependencies – Security vulnerabilities in third-party libraries."
+prompt:  "Hey goose, I need to perform a security audit across multiple projects. Let's check for…🔹 Hardcoded Credentials – API keys, passwords, and secrets left in the code.🔹 SQL Injection Risks – Unsafe queries that could expose data.🔹 Insecure Cryptographic Practices – Weak encryption methods that put data at risk.AND🔹 Exposed Config Files – Sensitive information that shouldn't be public.🔹 Outdated Dependencies – Security vulnerabilities in third-party libraries."
 
 Go goose, go goose!
 

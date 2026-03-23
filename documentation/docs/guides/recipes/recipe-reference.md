@@ -516,6 +516,19 @@ The `settings` field allows you to configure the AI model and provider settings 
 | `goose_provider` | String | - | The AI provider to use (e.g., "anthropic", "openai") |
 | `goose_model` | String | - | The specific model name to use |
 | `temperature` | Number | - | The temperature setting for the model (typically 0.0-1.0) |
+| `max_turns` | Number | - | Maximum number of turns for subagent tasks created by this recipe |
+
+#### Understanding max_turns
+
+The `max_turns` setting controls how many iterations an agent can perform before stopping. When set in a recipe's settings, it applies to that recipe's execution and any subagents or subrecipes it creates (unless they specify their own value).
+
+**Configuration precedence (highest to lowest):**
+1. Subagent tool call override
+2. Recipe `settings.max_turns`
+3. `GOOSE_SUBAGENT_MAX_TURNS` environment variable
+4. Default value (1000 for main recipes, 25 for subagents)
+
+**Common use cases:** Limit execution time for automated workflows, prevent runaway subagents, control resource usage in scheduled jobs.
 
 #### Example Settings Configuration
 
@@ -524,6 +537,7 @@ settings:
   goose_provider: "anthropic"
   goose_model: "claude-sonnet-4-20250514"
   temperature: 0.7
+  max_turns: 50
 ```
 
 ```yaml
@@ -668,6 +682,7 @@ activities:
 ```
 
 Advanced template features include:
+- [Escaping template variables](#escaping-template-variables) for literal output
 - [Template inheritance](#template-inheritance) using `{% extends "parent.yaml" %}`
 - Blocks that can be defined and overridden:
   ```yaml
@@ -676,6 +691,35 @@ Advanced template features include:
   {% endblock %}
   ```
 - [`indent()` template filter](#indent-filter-for-multi-line-values)
+
+### Escaping Template Variables
+
+To include literal template syntax (like `{{ variable }}`) in your recipe without parameter substitution, wrap it in single quotes:
+
+```yaml
+prompt: |
+  This will be substituted: {{ actual_parameter }}
+  This will appear literally: {{'{{example_variable}}'}}
+```
+
+**Example:** Generate a configuration file template
+
+```yaml
+version: "1.0.0"
+title: "Generate Config Template"
+description: "Generate a template with placeholder values"
+parameters:
+  - key: app_name
+    input_type: string
+    requirement: required
+    description: "Application name"
+
+prompt: |
+  Create a config.yaml file for {{ app_name }} with these placeholder variables:
+  - {{'{{API_KEY}}'}} for the API key
+  - {{'{{DATABASE_URL}}'}} for the database connection
+  - {{'{{PORT}}'}} for the server port
+```
 
 ### Template Inheritance
 
@@ -791,6 +835,7 @@ settings:
   goose_provider: "anthropic"
   goose_model: "claude-sonnet-4-20250514"
   temperature: 0.7
+  max_turns: 100
 
 retry:
   max_retries: 3
@@ -869,7 +914,8 @@ response:
   "settings": {
     "goose_provider": "anthropic",
     "goose_model": "claude-sonnet-4-20250514",
-    "temperature": 0.7
+    "temperature": 0.7,
+    "max_turns": 100
   },
   "retry": {
     "max_retries": 3,
