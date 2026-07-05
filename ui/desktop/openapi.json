@@ -4143,6 +4143,13 @@
               "type"
             ],
             "properties": {
+              "allowed_headers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Session `websocket_headers.v0` entries with these names (case-insensitive)\nare forwarded as HTTP headers on every request to this MCP server.\nEmpty means no dynamic header forwarding."
+              },
               "available_tools": {
                 "type": "array",
                 "items": {
@@ -7413,10 +7420,20 @@
           "session_id"
         ],
         "properties": {
+          "api_key": {
+            "type": "string",
+            "description": "Explicit API key for this session, bypassing global config. Enables\nper-session multi-tenant provider switching (openai/anthropic only).",
+            "nullable": true
+          },
           "context_limit": {
             "type": "integer",
             "nullable": true,
             "minimum": 0
+          },
+          "host": {
+            "type": "string",
+            "description": "Base URL for the provider API (e.g. \"https://api.deepseek.com\").\nWhen omitted, falls back to the provider's default host from global config.",
+            "nullable": true
           },
           "model": {
             "type": "string",

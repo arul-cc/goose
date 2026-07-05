@@ -629,6 +629,22 @@ fn apply_thinking_config(
     options: AnthropicFormatOptions,
 ) {
     let obj = payload.as_object_mut().unwrap();
+
+    // An explicit `thinking` directive supplied via request_params (e.g.
+    // CowGooseService disabling DeepSeek reasoning over the Anthropic-compatible
+    // endpoint with {"thinking": {"type": "disabled"}}) takes precedence over
+    // goose's own thinking logic, including the preserve_thinking_context
+    // force-enable below.
+    if let Some(explicit_thinking) = model_config
+        .request_params
+        .as_ref()
+        .and_then(|params| params.get("thinking"))
+        .cloned()
+    {
+        obj.insert("thinking".to_string(), explicit_thinking);
+        return;
+    }
+
     match thinking_type_for_provider(provider_name, model_config) {
         ThinkingType::Adaptive => {
             obj.insert("thinking".to_string(), json!({"type": "adaptive"}));

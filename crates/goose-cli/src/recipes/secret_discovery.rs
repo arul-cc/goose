@@ -169,6 +169,7 @@ mod tests {
                     socket: None,
                     bundled: None,
                     available_tools: Vec::new(),
+                    allowed_headers: Vec::new(),
                     headers: HashMap::new(),
                 },
                 ExtensionConfig::Stdio {
@@ -267,6 +268,7 @@ mod tests {
                     socket: None,
                     bundled: None,
                     available_tools: Vec::new(),
+                    allowed_headers: Vec::new(),
                     headers: HashMap::new(),
                 },
                 ExtensionConfig::Stdio {
@@ -328,6 +330,7 @@ mod tests {
                 socket: None,
                 bundled: None,
                 available_tools: Vec::new(),
+                allowed_headers: Vec::new(),
                 headers: HashMap::new(),
             }]),
             sub_recipes: Some(vec![SubRecipe {

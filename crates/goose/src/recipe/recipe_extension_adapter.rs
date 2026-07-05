@@ -69,6 +69,8 @@ enum RecipeExtensionConfigInternal {
         bundled: Option<bool>,
         #[serde(default)]
         available_tools: Vec<String>,
+        #[serde(default)]
+        allowed_headers: Vec<String>,
     },
     #[serde(rename = "frontend")]
     Frontend {
@@ -147,7 +149,8 @@ impl From<RecipeExtensionConfigInternal> for ExtensionConfig {
                 timeout,
                 socket,
                 bundled,
-                available_tools
+                available_tools,
+                allowed_headers
             },
             Frontend {
                 tools,

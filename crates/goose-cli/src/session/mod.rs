@@ -359,6 +359,7 @@ impl CliSession {
             socket: None,
             bundled: None,
             available_tools: Vec::new(),
+            allowed_headers: Vec::new(),
         }
     }
 
@@ -2519,6 +2520,7 @@ mod tests {
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         }
         ; "name_from_host"
     )]
@@ -2535,6 +2537,7 @@ mod tests {
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         }
         ; "port_and_path"
     )]
@@ -2551,6 +2554,7 @@ mod tests {
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "different_port_and_path"
     )]

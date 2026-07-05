@@ -16,7 +16,7 @@ use goose::agents::{Container, ExtensionLoadResult};
 use goose::agents::ExtensionConfig;
 use goose::config::resolve_extensions_for_new_session;
 use goose::config::{Config, GooseMode};
-use goose::providers::create;
+use goose::providers::{create, create_with_api_key};
 use goose::recipe::Recipe;
 use goose::recipe_deeplink;
 use goose::session::session_manager::SessionType;
@@ -42,6 +42,12 @@ pub struct UpdateProviderRequest {
     session_id: String,
     context_limit: Option<usize>,
     request_params: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// Explicit API key for this session, bypassing global config. Enables
+    /// per-session multi-tenant provider switching (openai/anthropic only).
+    api_key: Option<String>,
+    /// Base URL for the provider API (e.g. "https://api.deepseek.com").
+    /// When omitted, falls back to the provider's default host from global config.
+    host: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -271,6 +277,37 @@ async fn start_agent(
                 status: StatusCode::INTERNAL_SERVER_ERROR,
             }
         })?;
+
+    if let Some(ref recipe) = session.recipe {
+        match build_recipe_with_parameter_values(
+            recipe,
+            session.user_recipe_values.clone().unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(Some(recipe)) => {
+                let agent = state
+                    .get_agent_for_route(session.id.clone())
+                    .await
+                    .map_err(|status| ErrorResponse {
+                        message: format!("Failed to get agent: {}", status),
+                        status,
+                    })?;
+                if let Some(prompt) = apply_recipe_to_agent(&agent, &recipe, true).await {
+                    agent
+                        .extend_system_prompt("recipe".to_string(), prompt)
+                        .await;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(ErrorResponse {
+                    message: e.to_string(),
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                });
+            }
+        }
+    }
 
     // Eagerly start loading extensions in the background
     let session_for_spawn = session.clone();
@@ -596,16 +633,30 @@ async fn update_agent_provider(
         .map_err(|e| (e.status, e.message))?;
     model_config.reasoning = Some(model_info.reasoning);
 
-    let extensions =
-        EnabledExtensionsState::for_session(state.session_manager(), &payload.session_id, config)
-            .await;
-
-    let new_provider = create(&payload.provider, extensions).await.map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to create {} provider: {}", &payload.provider, e),
+    let new_provider = if let Some(ref api_key) = payload.api_key {
+        create_with_api_key(&payload.provider, api_key, payload.host.as_deref()).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Failed to create {} provider with api_key: {}",
+                    &payload.provider, e
+                ),
+            )
+        })?
+    } else {
+        let extensions = EnabledExtensionsState::for_session(
+            state.session_manager(),
+            &payload.session_id,
+            config,
         )
-    })?;
+        .await;
+        create(&payload.provider, extensions).await.map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to create {} provider: {}", &payload.provider, e),
+            )
+        })?
+    };
 
     agent
         .update_provider(new_provider, model_config, &payload.session_id)

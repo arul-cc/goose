@@ -261,6 +261,12 @@ pub enum ExtensionConfig {
         #[serde(default)]
         #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
+        /// Session `websocket_headers.v0` entries with these names (case-insensitive)
+        /// are forwarded as HTTP headers on every request to this MCP server.
+        /// Empty means no dynamic header forwarding.
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        allowed_headers: Vec<String>,
     },
     /// Frontend-provided tools that will be called through the frontend
     #[serde(rename = "frontend")]
@@ -334,6 +340,7 @@ impl ExtensionConfig {
             socket: None,
             bundled: None,
             available_tools: Vec::new(),
+            allowed_headers: Vec::new(),
         }
     }
 
@@ -452,6 +459,17 @@ impl ExtensionConfig {
         available_tools.is_empty() || available_tools.contains(&tool_name.to_string())
     }
 
+    /// Names of session headers this extension is allowed to forward to its
+    /// MCP server. Only meaningful for `StreamableHttp`; empty for others.
+    pub fn allowed_headers(&self) -> Vec<String> {
+        match self {
+            Self::StreamableHttp {
+                allowed_headers, ..
+            } => allowed_headers.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub async fn resolve(self, config: &Config) -> ExtensionResult<Self> {
         use crate::agents::extension_manager::{merge_environments, substitute_env_vars};
 
@@ -493,6 +511,7 @@ impl ExtensionConfig {
                 socket,
                 bundled,
                 available_tools,
+                allowed_headers,
             } => {
                 let merged = merge_environments(&envs, &env_keys, &name, config).await?;
                 let headers = headers
@@ -514,6 +533,7 @@ impl ExtensionConfig {
                     socket,
                     bundled,
                     available_tools,
+                    allowed_headers,
                 })
             }
             other => Ok(other),
@@ -764,6 +784,7 @@ available_tools: []
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -785,6 +806,7 @@ available_tools: []
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         }
         ; "header_substitution"
     )]
@@ -863,6 +885,7 @@ available_tools: []
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -881,6 +904,7 @@ available_tools: []
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         }
         ; "http_env_key_and_header_substitution"
     )]
@@ -896,6 +920,7 @@ available_tools: []
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -912,6 +937,7 @@ available_tools: []
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         }
         ; "http_env_key_uri_substitution"
     )]
@@ -975,6 +1001,7 @@ available_tools: []
             socket: Some("@egress.sock".to_string()),
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         };
         assert_eq!(
             config.to_string(),
@@ -995,6 +1022,7 @@ available_tools: []
             socket: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         };
         assert_eq!(
             config.to_string(),

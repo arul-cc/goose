@@ -357,6 +357,7 @@ impl TryFrom<RecipeExtensionDto> for ExtensionConfig {
                 socket,
                 bundled,
                 available_tools: available_tools.unwrap_or_default(),
+                allowed_headers: Vec::new(),
             },
         })
     }
@@ -429,6 +430,7 @@ impl TryFrom<ExtensionConfig> for RecipeExtensionDto {
                 socket,
                 bundled,
                 available_tools,
+                allowed_headers: _,
             } => Self::StreamableHttp {
                 name,
                 description: Some(description),

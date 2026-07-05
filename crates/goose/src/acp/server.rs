@@ -408,6 +408,7 @@ fn mcp_server_to_extension_config(mcp_server: McpServer) -> Result<ExtensionConf
                 socket: None,
                 bundled: Some(false),
                 available_tools: vec![],
+                allowed_headers: vec![],
             })
         }
         McpServer::Sse(_) => Err("SSE is unsupported, migrate to streamable_http".to_string()),
@@ -3131,6 +3132,7 @@ mod tests {
             socket: None,
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         })
     )]
     #[test_case(

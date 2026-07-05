@@ -1864,6 +1864,7 @@ mod tests {
             socket: None,
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         },
         vec![
             McpServer::Http(
@@ -1918,6 +1919,7 @@ mod tests {
             socket: None,
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: Vec::new(),
         };
 
         let servers = extension_configs_to_mcp_servers(&[config]);
