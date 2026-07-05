@@ -92,9 +92,22 @@ feature-by-feature reconciliation. New crate layout:
     `GooseClient::set_session_id`'s assert), so headers cannot leak across tenants.
   - Added `sse-stream` (0.2) as a direct dep of `goose` (needed to name
     `sse_stream::Sse` in the trait impl).
-  - **⚠️ Needs integration testing** against CowGooseService with real
-    `websocket_headers` flowing — the unit-testable allow-list logic compiles and
-    is covered, but the end-to-end multi-tenant flow was not exercised in the sync.
+  - **Injection side (the source of `websocket_headers.v0`)** — required for §4 to
+    have anything to forward; ported alongside it:
+    - `StartAgentRequest.extension_data: Option<ExtensionData>` +
+      merge in `start_agent` (`crates/goose-server/src/routes/agent.rs`) — lands
+      the initial headers before background extension loading.
+    - `PUT /sessions/{session_id}/extension_data` (`update_extension_data` in
+      `crates/goose-server/src/routes/session.rs`) — CowGooseService's follow-up /
+      token-rotation path; merges keys into the session's `extension_data`.
+    - Read back via `ExtensionData::get_extension_state("websocket_headers","v0")`,
+      keyed `"websocket_headers.v0"`. `SessionManager::instance()` shares the
+      static `SESSION_STORAGE`, so the DynamicHeaderClient reads exactly what these
+      routes write.
+    - **This was missed in the first sync pass** (dropped with §1-3 Layer B),
+      which is why headers didn't forward on first test; restored 2026-07-05.
+  - **⚠️ Still needs a full end-to-end integration check** against CowGooseService,
+    but the injection→read→filter→forward path is now complete and compiles.
 - **§9 DeepSeek thinking-disable + v4 models.**
   - `crates/goose-provider-types/src/formats/openai.rs`:
     `thinking_disable_model_patterns()` (env `GOOSE_THINKING_DISABLE_MODELS`,

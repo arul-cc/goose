@@ -2555,6 +2555,47 @@
         ]
       }
     },
+    "/sessions/{session_id}/extension_data": {
+      "put": {
+        "tags": [
+          "Session Management"
+        ],
+        "operationId": "update_extension_data",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Unique identifier for the session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": {}
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Extension data updated successfully"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
     "/sessions/{session_id}/extensions": {
       "get": {
         "tags": [
@@ -6766,6 +6807,14 @@
           "working_dir"
         ],
         "properties": {
+          "extension_data": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ExtensionData"
+              }
+            ],
+            "nullable": true
+          },
           "extension_overrides": {
             "type": "array",
             "items": {

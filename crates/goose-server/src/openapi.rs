@@ -443,6 +443,7 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         super::routes::session::update_session_user_recipe_values,
         super::routes::session::fork_session,
         super::routes::session::get_session_extensions,
+        super::routes::session::update_extension_data,
         super::routes::schedule::create_schedule,
         super::routes::schedule::list_schedules,
         super::routes::schedule::delete_schedule,
