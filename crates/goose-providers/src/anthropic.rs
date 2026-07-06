@@ -273,6 +273,21 @@ impl Provider for AnthropicProvider {
             tools,
             self.format_options,
         )?;
+
+        // Forward request-scoped Anthropic `metadata` (e.g. `{"user_id": ...}`
+        // derived from the session's security context) into the request body.
+        if let Some(metadata) = model_config
+            .request_params
+            .as_ref()
+            .and_then(|params| params.get("metadata"))
+            .cloned()
+        {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("metadata".to_string(), metadata);
+        }
+
         payload
             .as_object_mut()
             .unwrap()

@@ -603,6 +603,39 @@ async fn get_tools(
     Ok(Json(tools))
 }
 
+/// Build Anthropic request `metadata` for a session from its forwarded security
+/// context: reads `x-cow-security-context` out of `websocket_headers.v0`, parses
+/// its JSON, and uses the `ID` field as `user_id`. Returns None when the header
+/// or field is absent.
+async fn anthropic_user_metadata(
+    session_manager: &goose::session::session_manager::SessionManager,
+    session_id: &str,
+) -> Option<serde_json::Value> {
+    let session = session_manager.get_session(session_id, false).await.ok()?;
+    let websocket_headers = session
+        .extension_data
+        .get_extension_state("websocket_headers", "v0")?;
+
+    let user_id = websocket_headers.as_object().and_then(|headers| {
+        headers.iter().find_map(|(key, value)| {
+            if key.eq_ignore_ascii_case("x-cow-security-context") {
+                value.as_str().and_then(|s| {
+                    serde_json::from_str::<serde_json::Value>(s)
+                        .ok()
+                        .and_then(|json| {
+                            json.get("ID")
+                                .and_then(|id| id.as_str().map(str::to_string))
+                        })
+                })
+            } else {
+                None
+            }
+        })
+    })?;
+
+    Some(serde_json::json!({ "user_id": user_id }))
+}
+
 #[utoipa::path(
     post,
     path = "/agent/update_provider",
@@ -645,6 +678,19 @@ async fn update_agent_provider(
     if let Some(request_params) = payload.request_params {
         model_config = model_config.with_merged_request_params(request_params);
     }
+
+    // Anthropic-only: attach `metadata.user_id` derived from the session's
+    // security context so requests are attributable per ComplianceCow user.
+    if payload.provider == "anthropic" {
+        if let Some(metadata) =
+            anthropic_user_metadata(state.session_manager(), &payload.session_id).await
+        {
+            let mut params = std::collections::HashMap::new();
+            params.insert("metadata".to_string(), metadata);
+            model_config = model_config.with_merged_request_params(params);
+        }
+    }
+
     let model_info = resolve_provider_model_info(&payload.provider, &model)
         .await
         .map_err(|e| (e.status, e.message))?;

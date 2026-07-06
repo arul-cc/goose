@@ -119,6 +119,23 @@ feature-by-feature reconciliation. New crate layout:
   - `deepseek.json` gained `deepseek-v4-flash` / `deepseek-v4-pro`.
   - The old declarative `default_request_params` config field was **not**
     re-introduced — the env-based `thinking_disable_model_patterns` supersedes it.
+- **§6 (partial) Anthropic `metadata.user_id`.** Attributes Anthropic requests to
+  the ComplianceCow user. Because the provider now lives in `goose-providers`
+  (no `SessionManager` access) and `stream` has no `session_id`, this is split:
+  - `crates/goose-providers/src/anthropic.rs` — `stream` copies
+    `model_config.request_params["metadata"]` into the request body.
+  - `crates/goose-server/src/routes/agent.rs` — `update_agent_provider`, for the
+    `anthropic` provider, reads the session's `websocket_headers.v0`
+    → `x-cow-security-context` → JSON `ID`, and merges
+    `{"metadata": {"user_id": ID}}` into `request_params` (persisted in the
+    session's model_config). Helper: `anthropic_user_metadata`.
+  - **Limitation vs the old fork:** the old code read the session fresh on every
+    `stream`; this captures `user_id` when `update_provider` is called (once per
+    session — which CowGooseService always does for `anthropic`). `user_id` is
+    stable per session, so this is equivalent in practice, but a session that
+    never calls `update_provider` won't get the metadata.
+  - **Was missed in the first sync pass** (dropped with the rest of §6);
+    restored 2026-07-06.
 - **§10 Recipe instruction injection.** `start_agent`
   (`crates/goose-server/src/routes/agent.rs`) now applies the recipe to the agent
   (`apply_recipe_to_agent` → `extend_system_prompt("recipe", …)`), matching the
@@ -127,11 +144,13 @@ feature-by-feature reconciliation. New crate layout:
 
 ### ❌ Intentionally not ported
 
-- **§6 Caching config + tracking metadata.** Prompt caching itself is upstream
-  (`supports_cache_control` / `cache_control`). The fork's `create_session_with_id`
-  had **no caller** (dead code), and the per-request `session_id` tracking would
-  require invasive changes to upstream's shared `ApiClient` for telemetry only.
-  Revisit only if a concrete need appears.
+- **§6 (partial) — caching config + `create_session_with_id`.** Prompt caching
+  itself is upstream (`supports_cache_control` / `cache_control`). The fork's
+  `create_session_with_id` had **no caller** (dead code), and the per-request
+  `session_id` request tracking would require invasive changes to upstream's
+  shared `ApiClient` for telemetry only. Revisit only if a concrete need appears.
+  **Caveat:** the §6 commit (`1d2dec92f`) also bundled the Anthropic
+  `metadata.user_id` injection — see below; that part **was** needed and is ported.
 
 ---
 
