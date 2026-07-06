@@ -163,6 +163,26 @@ fn args_to_input_value(arguments: Option<JsonObject>) -> Value {
 }
 
 /// Convert internal Message format to Anthropic's API message specification
+/// Whether Anthropic prompt caching is disabled via `ANTHROPIC_DISABLE_CACHE`.
+/// Set this for endpoints that reject Anthropic `cache_control` blocks (e.g.
+/// DeepSeek's Anthropic-compatible API).
+fn cache_control_disabled() -> bool {
+    std::env::var("ANTHROPIC_DISABLE_CACHE").is_ok()
+}
+
+/// Build an ephemeral `cache_control` value, honoring an optional
+/// `ANTHROPIC_CACHE_TTL`.
+fn ephemeral_cache_control() -> Value {
+    let mut cache_control = json!({ TYPE_FIELD: "ephemeral" });
+    if let Ok(ttl) = std::env::var("ANTHROPIC_CACHE_TTL") {
+        cache_control
+            .as_object_mut()
+            .unwrap()
+            .insert("ttl".to_string(), json!(ttl));
+    }
+    cache_control
+}
+
 pub fn format_messages(messages: &[Message]) -> Vec<Value> {
     format_messages_with_options(messages, AnthropicFormatOptions::default())
 }
@@ -339,14 +359,14 @@ fn format_messages_with_options(
         let Some(target) = cache_control_target_index(content_array) else {
             continue;
         };
+        if cache_control_disabled() {
+            continue;
+        }
         if let Some(block) = content_array
             .get_mut(target)
             .and_then(|b| b.as_object_mut())
         {
-            block.insert(
-                CACHE_CONTROL_FIELD.to_string(),
-                json!({ TYPE_FIELD: "ephemeral" }),
-            );
+            block.insert(CACHE_CONTROL_FIELD.to_string(), ephemeral_cache_control());
             user_count += 1;
             if user_count >= 2 {
                 break;
@@ -430,10 +450,12 @@ pub fn format_tools(tools: &[Tool]) -> Vec<Value> {
     // Add "cache_control" to the last tool spec, if any. This means that all tool definitions,
     // will be cached as a single prefix.
     if let Some(last_tool) = tool_specs.last_mut() {
-        last_tool.as_object_mut().unwrap().insert(
-            CACHE_CONTROL_FIELD.to_string(),
-            json!({ TYPE_FIELD: "ephemeral" }),
-        );
+        if !cache_control_disabled() {
+            last_tool
+                .as_object_mut()
+                .unwrap()
+                .insert(CACHE_CONTROL_FIELD.to_string(), ephemeral_cache_control());
+        }
     }
 
     tool_specs
@@ -441,11 +463,17 @@ pub fn format_tools(tools: &[Tool]) -> Vec<Value> {
 
 /// Convert system message to Anthropic's API system specification
 pub fn format_system(system: &str) -> Value {
-    json!([{
+    let mut system_obj = json!({
         TYPE_FIELD: TEXT_TYPE,
         TEXT_TYPE: system,
-        CACHE_CONTROL_FIELD: { TYPE_FIELD: "ephemeral" }
-    }])
+    });
+    if !cache_control_disabled() {
+        system_obj
+            .as_object_mut()
+            .unwrap()
+            .insert(CACHE_CONTROL_FIELD.to_string(), ephemeral_cache_control());
+    }
+    json!([system_obj])
 }
 
 /// Convert Anthropic's API response to internal Message format

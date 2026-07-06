@@ -136,6 +136,16 @@ feature-by-feature reconciliation. New crate layout:
     never calls `update_provider` won't get the metadata.
   - **Was missed in the first sync pass** (dropped with the rest of §6);
     restored 2026-07-06.
+- **§6 (partial) Configurable Anthropic prompt caching.** Upstream inserts
+  `cache_control: {type: ephemeral}` on the system prompt, the last tool spec, and
+  message breakpoints **unconditionally**. DeepSeek's Anthropic-compatible endpoint
+  can reject `cache_control`, so the fork gated it by env:
+  - `crates/goose-provider-types/src/formats/anthropic.rs` — `cache_control_disabled()`
+    (`ANTHROPIC_DISABLE_CACHE`) skips all three insertions; `ephemeral_cache_control()`
+    honors `ANTHROPIC_CACHE_TTL`.
+  - **Was missed in the first sync pass** (part of §6); restored 2026-07-06.
+  - No env-mutating unit test added — it would race the parallel `cache_control`
+    presence tests; verified by compile + the existing suite (caching on by default).
 - **§10 Recipe instruction injection.** `start_agent`
   (`crates/goose-server/src/routes/agent.rs`) now applies the recipe to the agent
   (`apply_recipe_to_agent` → `extend_system_prompt("recipe", …)`), matching the
@@ -191,6 +201,8 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 | goose `config.yaml` | `ANTHROPIC_HOST=https://api.deepseek.com/anthropic` | DeepSeek's Anthropic-compatible endpoint |
 | goose `config.yaml` | `GOOSE_MODEL=deepseek-v4-pro[1m]` | Default model |
 | goose env | `GOOSE_THINKING_DISABLE_MODELS` | Comma-sep model substrings to default `thinking:disabled` (default `deepseek-v4`) |
+| goose env | `ANTHROPIC_DISABLE_CACHE` | Set to skip `cache_control` on Anthropic requests (needed for DeepSeek's Anthropic endpoint) |
+| goose env | `ANTHROPIC_CACHE_TTL` | Optional TTL applied to Anthropic `cache_control` blocks |
 | goose extension YAML | `allowed_headers` | Session headers forwarded to the MCP server (§4) |
 | CowGooseService env | `DEEPSEEK_THINKING_MODE` | `disabled` (default) / `enabled` / `passthrough` |
 | CowGooseService env | `DEEPSEEK_REASONING_EFFORT` | optional effort when enabled |
