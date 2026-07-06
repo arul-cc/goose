@@ -152,6 +152,25 @@ feature-by-feature reconciliation. New crate layout:
   idiom upstream already uses in `resume_agent`/`update_from_session`/`restart`.
   (Upstream applied recipes on those paths but not on `start_agent`.)
 
+### Operational tweaks (not in §1-11, found via identifier audit)
+
+- **Configurable SQLite pool size.** `crates/goose/src/session/session_manager.rs` —
+  `GOOSE_DB_MAX_CONNECTIONS` (default 50) on the session-store pool; upstream uses
+  sqlx's small default, which can exhaust under concurrent sessions.
+
+### Conscious architectural divergences (fork code deliberately NOT copied)
+
+- **`call_tool` `allowed_headers` threading.** The fork added an `allowed_headers`
+  parameter to `McpClientTrait::call_tool` and plumbed it through every impl
+  (`mcp_client.rs`, all `platform_extensions/*`, `acp/*`, `skills/client.rs`).
+  The sync instead attaches `allowed_headers` to the `DynamicHeaderClient` at
+  transport-creation time, so the signature change is unnecessary. The real
+  cow-mcp extension is a `StreamableHttp` extension routed through
+  `create_streamable_http_client` (where the client lives); platform/skills
+  clients never call cow-mcp, so they need no header forwarding.
+- **`ModelConfig.default_request_params` (declarative config field).** Replaced by
+  the env-based `GOOSE_THINKING_DISABLE_MODELS` mechanism (§9).
+
 ### ❌ Intentionally not ported
 
 - **§6 (partial) — caching config + `create_session_with_id`.** Prompt caching
@@ -203,6 +222,7 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 | goose env | `GOOSE_THINKING_DISABLE_MODELS` | Comma-sep model substrings to default `thinking:disabled` (default `deepseek-v4`) |
 | goose env | `ANTHROPIC_DISABLE_CACHE` | Set to skip `cache_control` on Anthropic requests (needed for DeepSeek's Anthropic endpoint) |
 | goose env | `ANTHROPIC_CACHE_TTL` | Optional TTL applied to Anthropic `cache_control` blocks |
+| goose env | `GOOSE_DB_MAX_CONNECTIONS` | Session-store SQLite pool size (default 50; raise for high session concurrency) |
 | goose extension YAML | `allowed_headers` | Session headers forwarded to the MCP server (§4) |
 | CowGooseService env | `DEEPSEEK_THINKING_MODE` | `disabled` (default) / `enabled` / `passthrough` |
 | CowGooseService env | `DEEPSEEK_REASONING_EFFORT` | optional effort when enabled |
