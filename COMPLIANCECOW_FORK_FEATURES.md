@@ -152,6 +152,19 @@ feature-by-feature reconciliation. New crate layout:
   idiom upstream already uses in `resume_agent`/`update_from_session`/`restart`.
   (Upstream applied recipes on those paths but not on `start_agent`.)
 
+### Branding (moocp / ComplianceCow)
+
+- **Agent self-identity rebranded** goose → **moocp**, AAIF → **ComplianceCow**, in the
+  system prompts: `crates/goose/src/prompts/system.md`,
+  `subagent_system.md`, `tiny_model_system.md`. This is the only user-facing
+  branding surface for a headless goose-server + custom-UI deployment (the API
+  returns no goose branding of its own). **Re-check these three files after each
+  upstream sync** — upstream edits them and a rebase will reintroduce "goose".
+- Deliberately NOT changed: the `GOOSE_*` env prefix, `~/.config/goose` config dir,
+  and the `goosed` binary name (internal only; users see just our UI). Set
+  `GOOSE_DISABLE_TELEMETRY=1` in deployment. Desktop/Electron branding (distros
+  guide §D) is N/A — we ship goose-server + our own UI (§E).
+
 ### Operational tweaks (not in §1-11, found via identifier audit)
 
 - **Configurable SQLite pool size.** `crates/goose/src/session/session_manager.rs` —
