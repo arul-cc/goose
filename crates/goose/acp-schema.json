@@ -434,6 +434,75 @@
       "x-side": "agent",
       "x-method": "_goose/unstable/session/extensions/remove"
     },
+    "UpdateSessionProviderRequest_unstable": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "apiKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contextLimit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "requestParams": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "sessionId",
+        "provider"
+      ],
+      "description": "ComplianceCow: switch an active session's LLM provider using an explicit,\nephemeral API key (multi-tenant — the key is never persisted to global\nconfig). `host` optionally routes to an alternate base URL (e.g. DeepSeek).",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/session/provider/update"
+    },
+    "SetSessionExtensionDataRequest_unstable": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "extensionData": {
+          "type": "object",
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "sessionId",
+        "extensionData"
+      ],
+      "description": "ComplianceCow: merge raw key/value entries into an active session's\n`extension_data` (e.g. `websocket_headers.v0`), the source the\nDynamicHeaderClient reads when forwarding allow-listed headers to MCP servers.",
+      "x-side": "agent",
+      "x-method": "_goose/unstable/session/extension_data/set"
+    },
     "GetToolsRequest_unstable": {
       "type": "object",
       "properties": {
@@ -7038,6 +7107,24 @@
                   ],
                   "description": "Params for _goose/unstable/session/extensions/remove",
                   "title": "RemoveSessionExtensionRequest_unstable"
+                },
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/UpdateSessionProviderRequest_unstable"
+                    }
+                  ],
+                  "description": "Params for _goose/unstable/session/provider/update",
+                  "title": "UpdateSessionProviderRequest_unstable"
+                },
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/SetSessionExtensionDataRequest_unstable"
+                    }
+                  ],
+                  "description": "Params for _goose/unstable/session/extension_data/set",
+                  "title": "SetSessionExtensionDataRequest_unstable"
                 },
                 {
                   "allOf": [
