@@ -73,6 +73,33 @@ Fork docs (this file, the feature registry, the sync workflow) were carried onto
 `acp-migration` from `sync-upstream-20260705` since the branch started from clean
 upstream.
 
+## Phase 2 progress (branch `acp-migration`) — goose side COMPLETE
+Ex-REST-route features re-homed as ACP custom methods (`goose` compiles, clippy clean):
+- ✅ §1–3 — `UpdateSessionProviderRequest` (`_goose/unstable/session/provider/update`):
+  ephemeral per-session api_key/host via `create_with_api_key`/`from_api_key`
+  (re-added) + `Agent::update_provider`; falls back to `recreate_provider_for_session`
+  with no key.
+- ✅ §6 user_id — `on_update_session_provider` attaches `metadata.user_id` from the
+  session's `x-cow-security-context` for the anthropic provider.
+- ✅ §4 injection — `SetSessionExtensionDataRequest`
+  (`_goose/unstable/session/extension_data/set`): merges keys (e.g.
+  `websocket_headers.v0`) into session `extension_data`.
+- ✅ §10 — already upstream: ACP `new_session` → `apply_recipe` →
+  `extend_system_prompt("recipe", …)`. Not re-ported.
+- ✅ `acp-schema.json` / `acp-meta.json` regenerated with both methods.
+
+**Remaining for the migration: Track B — the CowGooseService (Go) ACP client
+rewrite** (REST/SSE → ACP JSON-RPC over `goose serve` WebSocket), then end-to-end
+validation against `golden/rest-features-20260707`.
+
+New ACP methods CowGooseService will call (camelCase params):
+| Was (REST) | Now (ACP method) |
+|---|---|
+| `POST /agent/start` + `extension_data` | `session/new` (`_meta`) + `.../session/extension_data/set` |
+| `POST /agent/update_provider` (api_key/host) | `.../session/provider/update` |
+| `PUT /sessions/{id}/extension_data` | `.../session/extension_data/set` |
+| `POST /sessions/{id}/reply` / `/events` / `/cancel` / `/fork` | ACP `session/prompt` (+notifications) / cancel / `session/fork` |
+
 ## Phases
 0. **Spike (do first):** stand up upstream ACP server; learn `session/new`,
    `session/prompt` streaming, `update_provider`, and whether raw `extension_data`
