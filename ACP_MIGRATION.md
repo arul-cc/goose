@@ -58,10 +58,14 @@ Core features re-applied and compiling (`cargo check -p goose` green):
   `AnthropicFormatOptions.prompt_cache_disabled`. (§6 `ANTHROPIC_CACHE_TTL` deferred:
   upstream's cache toggle is boolean, no TTL slot.)
 - ✅ §6 user_id — `stream_for_model` forwards `request_params[metadata]`.
-- ⏳ **§4 DynamicHeaderClient + `allowed_headers`** — the last Phase 1 piece (client
-  side only; the websocket_headers *injection* side is a Phase 2 ACP custom method).
-  Imports / `add_extension(session_id)` / `create_streamable_http_client` structure
-  confirmed present in the drifted `extension_manager.rs`.
+- ✅ §4 DynamicHeaderClient + `allowed_headers` (client side) — re-applied; rmcp
+  3.1.2's `get_stream` now takes `Option<Arc<str>>`; `sse-stream` dep re-added;
+  `filter_allowed_headers` unit-tested (3 tests). The websocket_headers *injection*
+  side remains a Phase 2 ACP custom method.
+
+**Phase 1 complete** — `cargo check -p goose --all-targets` compiles, clippy clean.
+(Workspace-wide `--all-targets` is blocked only by the pre-existing `v8-goose`
+`rusty_v8` native-lib gap in this environment, unrelated to the migration.)
 - Deferred to Phase 2 (would be dead code until their ACP method exists):
   `from_api_key` / `create_with_api_key` (§1–3 building blocks).
 
