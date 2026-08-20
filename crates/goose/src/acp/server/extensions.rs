@@ -333,6 +333,7 @@ fn goose_extension_to_config(
                 scopes,
                 bundled,
                 available_tools: available_tools.unwrap_or_default(),
+                allowed_headers: Vec::new(),
             },
             McpServer::Sse(_) => {
                 return Err(agent_client_protocol::Error::invalid_params()
@@ -584,6 +585,7 @@ mod tests {
             scopes: vec!["scope.read".to_string()],
             bundled: None,
             available_tools: vec!["fetch".to_string()],
+            allowed_headers: Vec::new(),
         };
 
         let extension = config_to_goose_extension(&config)
@@ -767,6 +769,7 @@ mod tests {
             scopes,
             bundled,
             available_tools,
+            allowed_headers: _,
         } = conversion.config
         else {
             panic!("expected streamable http config");
