@@ -268,6 +268,24 @@ pub async fn create(name: &str, extensions: Vec<ExtensionConfig>) -> Result<Arc<
     entry.create(extensions).await
 }
 
+/// Create a provider from an explicit API key (and optional host) supplied at
+/// runtime, bypassing global config. Used for per-session multi-tenant provider
+/// switching where each session carries its own credentials. Only the `openai`
+/// and `anthropic` providers are supported.
+pub fn create_with_api_key(
+    name: &str,
+    api_key: &str,
+    host: Option<&str>,
+) -> Result<Arc<dyn Provider>> {
+    match name {
+        "openai" => Ok(Arc::new(super::openai_def::from_api_key(api_key, host)?)),
+        "anthropic" => Ok(Arc::new(super::anthropic_def::from_api_key(api_key, host)?)),
+        other => Err(anyhow::anyhow!(
+            "create_with_api_key only supports 'openai' and 'anthropic' providers, got '{other}'"
+        )),
+    }
+}
+
 pub async fn create_with_working_dir(
     name: &str,
     extensions: Vec<ExtensionConfig>,

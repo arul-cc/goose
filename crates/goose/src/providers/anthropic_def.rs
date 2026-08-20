@@ -65,6 +65,31 @@ async fn from_env(
     Ok(AnthropicProviderBuilder::new(api_client).build())
 }
 
+/// Build an Anthropic provider from an explicit API key supplied at runtime
+/// (per-session, e.g. forwarded by CowGooseService) rather than from global
+/// config. `host_override` routes the provider to an alternate base URL (e.g.
+/// DeepSeek's Anthropic-compatible endpoint); when omitted it falls back to
+/// `ANTHROPIC_HOST` from config.
+pub fn from_api_key(api_key: &str, host_override: Option<&str>) -> Result<AnthropicProvider> {
+    let host = match host_override {
+        Some(h) => h.to_string(),
+        None => crate::config::Config::global()
+            .get_param("ANTHROPIC_HOST")
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
+    };
+
+    let auth = AuthMethod::ApiKey {
+        header_name: "x-api-key".to_string(),
+        key: api_key.to_string(),
+    };
+
+    let api_client = ApiClient::new_with_tls(host, auth, None)?
+        .with_request_builder(crate::session_context::session_id_request_builder())
+        .with_header("anthropic-version", ANTHROPIC_API_VERSION)?;
+
+    Ok(AnthropicProviderBuilder::new(api_client).build())
+}
+
 pub fn from_custom_config(
     config: DeclarativeProviderConfig,
     tls_config: Option<TlsConfig>,

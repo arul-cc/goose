@@ -45,6 +45,38 @@ pub struct RemoveSessionExtensionRequest {
     pub extension_key: String,
 }
 
+/// ComplianceCow: switch an active session's LLM provider using an explicit,
+/// ephemeral API key (multi-tenant — the key is never persisted to global
+/// config). `host` optionally routes to an alternate base URL (e.g. DeepSeek).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(method = "_goose/unstable/session/provider/update", response = EmptyResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSessionProviderRequest {
+    pub session_id: String,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_params: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// ComplianceCow: merge raw key/value entries into an active session's
+/// `extension_data` (e.g. `websocket_headers.v0`), the source the
+/// DynamicHeaderClient reads when forwarding allow-listed headers to MCP servers.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(method = "_goose/unstable/session/extension_data/set", response = EmptyResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSessionExtensionDataRequest {
+    pub session_id: String,
+    pub extension_data: HashMap<String, serde_json::Value>,
+}
+
 /// List all tools available in a session.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
 #[request(method = "_goose/unstable/tools/list", response = GetToolsResponse)]

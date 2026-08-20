@@ -166,6 +166,36 @@ pub async fn from_env(
     Ok(provider)
 }
 
+/// Build an OpenAI provider from an explicit API key supplied at runtime
+/// (per-session, e.g. forwarded by CowGooseService) rather than from global
+/// config. `host_override` routes the provider to an alternate base URL (e.g.
+/// DeepSeek at `https://api.deepseek.com`); when omitted it falls back to
+/// `OPENAI_HOST` from config. `preserve_thinking_context` is enabled only when
+/// the resolved host is not OpenAI's own API.
+pub fn from_api_key(api_key: &str, host_override: Option<&str>) -> Result<OpenAiProvider> {
+    let host = match host_override {
+        Some(h) => h.to_string(),
+        None => crate::config::Config::global()
+            .get_param("OPENAI_HOST")
+            .unwrap_or_else(|_| "https://api.openai.com".to_string()),
+    };
+
+    let is_openai = is_direct_openai_host(&host);
+    let auth = AuthMethod::BearerToken(api_key.to_string());
+    let api_client = ApiClient::with_timeout_and_tls(
+        host,
+        auth,
+        std::time::Duration::from_secs(600),
+        None,
+    )?
+    .with_request_builder(crate::session_context::session_id_request_builder());
+
+    Ok(OpenAiProviderBuilder::new(api_client)
+        .base_path(OPEN_AI_DEFAULT_BASE_PATH)
+        .preserve_thinking_context(!is_openai)
+        .build())
+}
+
 /// Resolve the API key from a declarative provider config.
 ///
 /// Returns `Some(key)` if a key is found, `None` if the key is optional/missing,
