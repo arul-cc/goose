@@ -816,6 +816,7 @@ mod tests {
             scopes: vec![],
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         &[
             r#"mcp_servers.lookup.url="http://localhost/mcp""#,
@@ -838,6 +839,7 @@ mod tests {
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         &[
             r#"mcp_servers.mcp_kiwi_com.url="https://mcp.kiwi.com""#,
