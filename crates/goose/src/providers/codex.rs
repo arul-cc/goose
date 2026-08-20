@@ -814,6 +814,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"p
             scopes: vec![],
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         &[
             r#"mcp_servers.lookup.url="http://localhost/mcp""#,
@@ -836,6 +837,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"p
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         &[
             r#"mcp_servers.mcp_kiwi_com.url="https://mcp.kiwi.com""#,

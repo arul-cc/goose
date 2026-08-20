@@ -425,6 +425,7 @@ impl CliSession {
             scopes: vec![],
             bundled: None,
             available_tools: Vec::new(),
+            allowed_headers: Vec::new(),
         }
     }
 

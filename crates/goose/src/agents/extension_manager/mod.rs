@@ -516,6 +516,7 @@ impl ExtensionManager {
                 client_id,
                 client_secret_key,
                 scopes,
+                allowed_headers,
                 ..
             } => {
                 let static_oauth_client = streamable_http::resolve_static_oauth_client(
@@ -529,6 +530,8 @@ impl ExtensionManager {
                     name: name.clone(),
                     headers: headers.clone(),
                     static_oauth_client,
+                    allowed_headers: allowed_headers.clone(),
+                    session_id: session_id.map(str::to_string),
                     ctx: ctx(*timeout, working_dir),
                 };
                 streamable_http::connect(
@@ -1556,6 +1559,66 @@ impl ExtensionManager {
             }
         }
         parts
+    }
+}
+
+#[cfg(test)]
+mod dynamic_header_tests {
+    use super::filter_allowed_headers;
+    use axum::http::{HeaderName, HeaderValue};
+    use serde_json::json;
+
+    fn obj(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn forwards_only_allow_listed_headers_case_insensitively() {
+        let headers = obj(json!({
+            "X-Api-Key": "secret",
+            "X-Tenant-Id": "acme",
+            "X-Not-Allowed": "nope",
+        }));
+        let allowed = vec!["x-api-key".to_string(), "X-TENANT-ID".to_string()];
+        let result = filter_allowed_headers(&headers, &allowed);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get(&HeaderName::from_static("x-api-key")),
+            Some(&HeaderValue::from_static("secret"))
+        );
+        assert_eq!(
+            result.get(&HeaderName::from_static("x-tenant-id")),
+            Some(&HeaderValue::from_static("acme"))
+        );
+        assert!(!result.contains_key(&HeaderName::from_static("x-not-allowed")));
+    }
+
+    #[test]
+    fn empty_allow_list_forwards_nothing() {
+        let headers = obj(json!({ "X-Api-Key": "secret" }));
+        assert!(filter_allowed_headers(&headers, &[]).is_empty());
+    }
+
+    #[test]
+    fn skips_non_string_and_invalid_values() {
+        let headers = obj(json!({
+            "X-Api-Key": 12345,
+            "X-Tenant-Id": "ok",
+            "X-Bad-Value": "line\nbreak",
+        }));
+        let allowed = vec![
+            "x-api-key".to_string(),
+            "x-tenant-id".to_string(),
+            "x-bad-value".to_string(),
+        ];
+        let result = filter_allowed_headers(&headers, &allowed);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&HeaderName::from_static("x-tenant-id")),
+            Some(&HeaderValue::from_static("ok"))
+        );
     }
 }
 

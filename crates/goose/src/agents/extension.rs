@@ -251,6 +251,12 @@ pub enum ExtensionConfig {
         #[serde(default)]
         #[serde(skip_serializing_if = "Vec::is_empty")]
         available_tools: Vec<String>,
+        /// Session `websocket_headers.v0` entries with these names (case-insensitive)
+        /// are forwarded as HTTP headers on every request to this MCP server.
+        /// Empty means no dynamic header forwarding.
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        allowed_headers: Vec<String>,
     },
 }
 
@@ -288,6 +294,7 @@ impl ExtensionConfig {
             scopes: Vec::new(),
             bundled: None,
             available_tools: Vec::new(),
+            allowed_headers: Vec::new(),
         }
     }
 
@@ -377,6 +384,17 @@ impl ExtensionConfig {
         available_tools.is_empty() || available_tools.contains(&tool_name.to_string())
     }
 
+    /// Names of session headers this extension is allowed to forward to its
+    /// MCP server. Only meaningful for `StreamableHttp`; empty for others.
+    pub fn allowed_headers(&self) -> Vec<String> {
+        match self {
+            Self::StreamableHttp {
+                allowed_headers, ..
+            } => allowed_headers.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub async fn resolve(self, config: &Config) -> ExtensionResult<Self> {
         match self {
             Self::Stdio {
@@ -419,6 +437,7 @@ impl ExtensionConfig {
                 scopes,
                 bundled,
                 available_tools,
+                allowed_headers,
             } => {
                 // Resolve the OAuth client secret alongside env_keys so that
                 // rotating it changes the resolved config, which is what
@@ -449,6 +468,7 @@ impl ExtensionConfig {
                     scopes,
                     bundled,
                     available_tools,
+                    allowed_headers,
                 })
             }
             other => Ok(other),
@@ -822,6 +842,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -846,6 +867,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "header_substitution"
     )]
@@ -927,6 +949,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -948,6 +971,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "http_env_key_and_header_substitution"
     )]
@@ -966,6 +990,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -985,6 +1010,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "http_env_key_uri_substitution"
     )]
@@ -1038,6 +1064,7 @@ timeout: 300",
             scopes: vec!["scope.read".into()],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -1057,6 +1084,7 @@ timeout: 300",
             scopes: vec!["scope.read".into()],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "http_client_id_substitution_and_oauth_fields_preserved"
     )]
@@ -1075,6 +1103,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -1094,6 +1123,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "http_client_secret_key_resolved_without_env_keys_entry"
     )]
@@ -1157,6 +1187,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         };
         assert_eq!(
             config.to_string(),
@@ -1180,6 +1211,7 @@ timeout: 300",
             scopes: vec![],
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         };
         assert_eq!(
             config.to_string(),

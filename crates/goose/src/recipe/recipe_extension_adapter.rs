@@ -74,6 +74,8 @@ enum RecipeExtensionConfigInternal {
         bundled: Option<bool>,
         #[serde(default)]
         available_tools: Vec<String>,
+        #[serde(default)]
+        allowed_headers: Vec<String>,
     },
 }
 
@@ -131,7 +133,8 @@ impl From<RecipeExtensionConfigInternal> for ExtensionConfig {
                 client_secret_key,
                 scopes,
                 bundled,
-                available_tools
+                available_tools,
+                allowed_headers
             }
         )
     }
