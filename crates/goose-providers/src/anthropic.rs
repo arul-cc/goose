@@ -162,6 +162,20 @@ impl AnthropicProvider {
             tools,
             format_options,
         )?;
+
+        // Forward request-scoped Anthropic `metadata` (e.g. `{"user_id": ...}`
+        // derived from the session's security context) into the request body.
+        if let Some(metadata) = model_config
+            .request_params
+            .as_ref()
+            .and_then(|params| params.get("metadata"))
+            .cloned()
+        {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("metadata".to_string(), metadata);
+            }
+        }
+
         payload["stream"] = Value::Bool(true);
         Ok(payload)
     }
