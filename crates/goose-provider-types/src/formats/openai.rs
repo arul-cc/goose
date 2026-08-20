@@ -1659,6 +1659,26 @@ where
     }
 }
 
+/// Case-insensitive model-name substrings for which goose defaults the
+/// DeepSeek-style `thinking` parameter to disabled on the openai-compatible
+/// endpoint (to avoid billing for reasoning output). An explicit `thinking`
+/// directive supplied via `request_params` always takes precedence.
+///
+/// Configured via `GOOSE_THINKING_DISABLE_MODELS` (comma-separated). When the
+/// var is unset, defaults to `deepseek-v4`. Setting it to an empty value
+/// disables the behavior entirely.
+fn thinking_disable_model_patterns() -> &'static [String] {
+    static PATTERNS: OnceLock<Vec<String>> = OnceLock::new();
+    PATTERNS.get_or_init(|| match std::env::var("GOOSE_THINKING_DISABLE_MODELS") {
+        Ok(value) => value
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Err(_) => vec!["deepseek-v4".to_string()],
+    })
+}
+
 pub fn create_request(
     model_config: &ModelConfig,
     system: &str,
@@ -1801,6 +1821,22 @@ pub fn create_request_for_model_with_options(
                     obj.insert(key.clone(), value.clone());
                 }
             }
+        }
+    }
+
+    // Models reached via the openai-compatible endpoint that emit reasoning
+    // tokens by default (e.g. DeepSeek v4 via OPENAI_HOST=https://api.deepseek.com)
+    // bill that reasoning as output. For models matching the configured patterns,
+    // default `thinking` to disabled unless an explicit directive was already
+    // supplied (via request_params above). See `thinking_disable_model_patterns`.
+    let model_lower = model_config.model_name.to_lowercase();
+    if thinking_disable_model_patterns()
+        .iter()
+        .any(|pattern| model_lower.contains(pattern))
+    {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.entry("thinking")
+                .or_insert_with(|| json!({"type": "disabled"}));
         }
     }
 

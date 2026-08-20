@@ -79,9 +79,17 @@ impl AnthropicFormatOptions {
             current_model: self
                 .current_model
                 .or_else(|| Some(model_config.model_name.clone())),
-            prompt_cache_disabled: model_config.prompt_cache_disabled(),
+            prompt_cache_disabled: model_config.prompt_cache_disabled()
+                || anthropic_disable_cache_env(),
         }
     }
+}
+
+/// Whether `ANTHROPIC_DISABLE_CACHE` is set — a deployment-wide override that
+/// suppresses Anthropic `cache_control` blocks. Needed for endpoints that reject
+/// them (e.g. DeepSeek's Anthropic-compatible API).
+fn anthropic_disable_cache_env() -> bool {
+    std::env::var("ANTHROPIC_DISABLE_CACHE").is_ok()
 }
 
 pub fn thinking_block_is_stale(message: &Message, current_model: Option<&str>) -> bool {
@@ -719,6 +727,22 @@ fn apply_thinking_config(
     options: AnthropicFormatOptions,
 ) {
     let obj = payload.as_object_mut().unwrap();
+
+    // An explicit `thinking` directive supplied via request_params (e.g.
+    // CowGooseService disabling DeepSeek reasoning over the Anthropic-compatible
+    // endpoint with {"thinking": {"type": "disabled"}}) takes precedence over
+    // goose's own thinking logic, including the preserve_thinking_context
+    // force-enable below.
+    if let Some(explicit_thinking) = model_config
+        .request_params
+        .as_ref()
+        .and_then(|params| params.get("thinking"))
+        .cloned()
+    {
+        obj.insert("thinking".to_string(), explicit_thinking);
+        return;
+    }
+
     match thinking_type_for_provider(provider_name, model_config) {
         ThinkingType::Adaptive => {
             obj.insert("thinking".to_string(), json!({"type": "adaptive"}));
