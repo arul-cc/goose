@@ -937,7 +937,16 @@ impl SessionStorage {
             .busy_timeout(std::time::Duration::from_secs(30))
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
-        SqlitePoolOptions::new().connect_lazy_with(options)
+        // Raise the default pool size (sqlx defaults to 5) so many concurrent
+        // sessions on one server don't exhaust connections; tunable via env.
+        let max_connections = std::env::var("GOOSE_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(50);
+
+        SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .connect_lazy_with(options)
     }
 
     pub fn new(data_dir: PathBuf) -> Self {
