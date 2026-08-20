@@ -36,6 +36,35 @@ impl GooseAcpAgent {
         Ok(EmptyResponse {})
     }
 
+    /// ComplianceCow custom method: merge raw key/value entries into a session's
+    /// `extension_data` (e.g. `websocket_headers.v0`). Merges so a partial update
+    /// doesn't clobber other extension state. This is the source the
+    /// `DynamicHeaderClient` reads when forwarding allow-listed MCP headers.
+    pub(super) async fn on_set_session_extension_data(
+        &self,
+        req: SetSessionExtensionDataRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        let session = self
+            .session_manager
+            .get_session(&req.session_id, false)
+            .await
+            .internal_err()?;
+
+        let mut merged = session.extension_data;
+        for (key, value) in req.extension_data {
+            merged.extension_states.insert(key, value);
+        }
+
+        self.session_manager
+            .update(&req.session_id)
+            .extension_data(merged)
+            .apply()
+            .await
+            .internal_err()?;
+
+        Ok(EmptyResponse {})
+    }
+
     pub(super) async fn on_get_config_extensions(
         &self,
     ) -> Result<GetConfigExtensionsResponse, agent_client_protocol::Error> {
