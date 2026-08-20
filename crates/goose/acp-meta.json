@@ -11,6 +11,16 @@
       "responseType": "EmptyResponse"
     },
     {
+      "method": "_goose/unstable/session/provider/update",
+      "requestType": "UpdateSessionProviderRequest_unstable",
+      "responseType": "EmptyResponse"
+    },
+    {
+      "method": "_goose/unstable/session/extension_data/set",
+      "requestType": "SetSessionExtensionDataRequest_unstable",
+      "responseType": "EmptyResponse"
+    },
+    {
       "method": "_goose/unstable/tools/list",
       "requestType": "GetToolsRequest_unstable",
       "responseType": "GetToolsResponse_unstable"
