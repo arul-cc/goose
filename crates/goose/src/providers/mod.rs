@@ -100,7 +100,8 @@ pub mod xai;
 pub mod xai_oauth;
 
 pub use init::{
-    cleanup_provider, create, create_with_default_model, get_from_registry, inventory_identity,
+    cleanup_provider, create, create_with_api_key, create_with_default_model, get_from_registry,
+    inventory_identity,
     providers, refresh_custom_providers,
 };
 pub use retry::{retry_operation, RetryConfig};
