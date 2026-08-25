@@ -304,6 +304,12 @@ half of the preservation gate in `.agents/workflows/sync-upstream.md`.
 Every one was **mutation-verified**: breaking the feature it covers makes it fail,
 so a green run is meaningful rather than vacuous.
 
+> **Follow-up:** adding `allowed_headers` to the ACP wire type changed
+> `crates/goose/acp-schema.json` (regenerated). The generated TypeScript SDK in
+> `ui/sdk/src/generated/` was **not** regenerated — `just generate-acp-types`
+> needs `npm install` in `ui/sdk` first. Harmless for us (our UI does not use
+> goose's TS SDK), but `just check-acp-schema` will fail until it is run.
+
 **Not covered** (needs live infra): the real cow-mcp server, a real LLM provider,
 and CowGooseService driving goose over ACP end-to-end.
 
