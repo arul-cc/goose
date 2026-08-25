@@ -279,6 +279,44 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 | CowGooseService env | `DEEPSEEK_THINKING_MODE` | `disabled` (default) / `enabled` / `passthrough` |
 | CowGooseService env | `DEEPSEEK_REASONING_EFFORT` | optional effort when enabled |
 
+## Running locally (post-ACP: there is no more `goosed`)
+
+```bash
+source bin/activate-hermit
+export SSL_CERT_FILE=$(python3 -m certifi)   # REQUIRED, see gotcha below
+cargo build -p goose-cli                      # produces target/debug/goose
+
+# ACP server (replaces the deleted goose-server REST API)
+GOOSE_SERVER__SECRET_KEY=test ./target/debug/goose serve --host 127.0.0.1 --port 3284
+# or: just run-server   (same thing on port 3000)
+
+# interactive CLI instead of the server
+./target/debug/goose session
+```
+
+Verify it is up:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3284/health          # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3284/acp             # 401 (auth enforced)
+curl -s -o /dev/null -w '%{http_code}\n' -H 'x-secret-key: test' .../acp        # 406 (auth OK; needs WS upgrade)
+```
+ACP is JSON-RPC 2.0 over the **WebSocket at `/acp`**, authenticated with
+**`x-secret-key`** — exactly what CowGooseService's `ACPConn` speaks.
+
+### ⚠️ Build gotcha: `could not find native static library rusty_v8`
+`goose` depends on v8 (via `pctx_code_mode` → `deno_core`). Its build script
+downloads a 32 MB prebuilt `librusty_v8` from GitHub using **Python**, which on
+macOS fails with `CERTIFICATE_VERIFY_FAILED` (no CA certs) — so the build fails
+and, worse, **`goose-cli` silently never compiles**, which hides real errors from
+`cargo check --all-targets`. Fix:
+```bash
+export SSL_CERT_FILE=$(python3 -m certifi)   # or run "/Applications/Python 3.12/Install Certificates.command"
+cargo clean -p v8-goose -p v8 && cargo build -p goose-cli
+```
+(the `cargo clean` is needed once — `SSL_CERT_FILE` is not in the build script's
+`rerun-if-env-changed`, so a cached failure would otherwise persist).
+**Always build `-p goose-cli` before trusting a green check.**
+
 ## Build / verify
 - **goose:** `source bin/activate-hermit && cargo build && cargo clippy --all-targets -- -D warnings && cargo fmt`
 - After goose server-route changes: `just generate-openapi` (the sync added
