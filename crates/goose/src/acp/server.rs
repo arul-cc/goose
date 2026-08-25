@@ -2622,7 +2622,8 @@ impl GooseAcpAgent {
                         serde_json::from_str::<serde_json::Value>(s)
                             .ok()
                             .and_then(|json| {
-                                json.get("ID").and_then(|id| id.as_str().map(str::to_string))
+                                json.get("ID")
+                                    .and_then(|id| id.as_str().map(str::to_string))
                             })
                     })
                 } else {
