@@ -279,6 +279,33 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 | CowGooseService env | `DEEPSEEK_THINKING_MODE` | `disabled` (default) / `enabled` / `passthrough` |
 | CowGooseService env | `DEEPSEEK_REASONING_EFFORT` | optional effort when enabled |
 
+## Verifying the fork features
+
+```bash
+cargo test -p goose --test compliancecow_features_test   # 6 tests
+cargo test -p goose --lib summon                         # incl. 4 §12 tests
+```
+Both run **offline** — no API keys, no ports, no network — and use
+`GOOSE_PATH_ROOT` + tempdirs, so they never touch `~/.config/goose` or a real
+session database. Run them after every upstream sync; they are the executable
+half of the preservation gate in `.agents/workflows/sync-upstream.md`.
+
+| Feature | Covered by |
+|---|---|
+| §4 injection (`extension_data/set`, incl. merge on token rotation) | `set_session_extension_data_persists_and_merges_websocket_headers` |
+| §4 forwarding (allow-listed headers reach the MCP server; others never do) | `allow_listed_session_headers_are_forwarded_to_the_mcp_server` |
+| §1-3 tenant api_key/host, §6 `metadata.user_id`, §9 `thinking` params | `update_session_provider_applies_tenant_key_request_params_and_user_id` |
+| §6 `ANTHROPIC_DISABLE_CACHE` | `anthropic_disable_cache_env_strips_cache_control` |
+| §9 deepseek-v4 thinking default | `deepseek_v4_defaults_to_thinking_disabled_on_openai_format` |
+| Branding (moocp/ComplianceCow prompts) | `agent_identity_is_rebranded_to_moocp` |
+| §12 subagent tenant key + parent tenant-state inheritance | 4 tests in `summon.rs` |
+
+Every one was **mutation-verified**: breaking the feature it covers makes it fail,
+so a green run is meaningful rather than vacuous.
+
+**Not covered** (needs live infra): the real cow-mcp server, a real LLM provider,
+and CowGooseService driving goose over ACP end-to-end.
+
 ## Running locally (post-ACP: there is no more `goosed`)
 
 ```bash
