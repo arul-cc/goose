@@ -16,7 +16,9 @@ pub fn setup_logging(name: Option<&str>) -> &'static Result<()> {
             component: "cli",
             name,
             extra_directives: &["goose_cli=info"],
-            console: false,
+            console: std::env::var("GOOSE_LOG_CONSOLE")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
             json: true,
         };
         let subscriber = goose::logging::build_logging_subscriber(&config)?;
