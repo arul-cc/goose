@@ -40,6 +40,47 @@ const SUBAGENT_DESCRIPTION_BUDGET: usize = 160;
 
 const TASK_LABEL_BUDGET: usize = 60;
 
+/// Session extension state a subagent inherits from its parent: the tenant
+/// context and the forwarded headers, so the subagent's MCP calls carry the
+/// same identity as the parent's.
+const INHERITED_SUBAGENT_EXTENSION_STATES: &[&str] = &["cow_tenant.v0", "websocket_headers.v0"];
+
+/// Whether subagent-session resume is enabled (`GOOSE_SUBAGENT_RESUME`). When
+/// off, the `subagent_session_id` parameter is not offered to the model and
+/// every delegate call starts a fresh subagent session.
+fn subagent_resume_enabled() -> bool {
+    std::env::var("GOOSE_SUBAGENT_RESUME")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
+/// Read the session's forwarded per-tenant provider credentials out of
+/// `websocket_headers.v0` — `x-api-key` plus an optional host override. Returns
+/// None when the session carries no tenant key (the normal single-tenant case).
+fn session_provider_credentials(
+    session: &crate::session::Session,
+) -> Option<(String, Option<String>)> {
+    let headers = session
+        .extension_data
+        .get_extension_state("websocket_headers", "v0")?;
+    let headers = headers.as_object()?;
+
+    let mut api_key = None;
+    let mut host = None;
+    for (key, value) in headers {
+        let Some(value) = value.as_str() else {
+            continue;
+        };
+        match key.to_lowercase().as_str() {
+            "x-api-key" => api_key = Some(value.to_string()),
+            "x-openai-host" | "x-anthropic-host" | "x-host" => host = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    api_key.map(|key| (key, host))
+}
+
 fn kind_plural(kind: SourceType) -> &'static str {
     match kind {
         SourceType::Subrecipe => "Subrecipes",
@@ -63,6 +104,10 @@ pub struct DelegateParams {
     pub working_dir: Option<String>,
     #[serde(default)]
     pub r#async: bool,
+    /// Resume a previous subagent session instead of creating a new one.
+    /// Only offered to the model when `GOOSE_SUBAGENT_RESUME` is enabled.
+    #[serde(default)]
+    pub subagent_session_id: Option<String>,
 }
 
 pub struct BackgroundTask {
@@ -585,10 +630,35 @@ impl SummonClient {
             .map_err(|e| format!("Failed to create subagent session: {}", e))?;
 
         if !task_config.parent_session_id.is_empty() {
-            self.context
+            let mut update = self
+                .context
                 .session_manager
                 .update(&session.id)
-                .parent_session_id(Some(task_config.parent_session_id.clone()))
+                .parent_session_id(Some(task_config.parent_session_id.clone()));
+
+            // Inherit the parent's tenant context so the subagent's own MCP tool
+            // calls forward the same allow-listed headers (see DynamicHeaderClient).
+            // Without this a subagent would call cow-mcp with no tenant headers.
+            if let Ok(parent) = self
+                .context
+                .session_manager
+                .get_session(&task_config.parent_session_id, false)
+                .await
+            {
+                let mut inherited = crate::session::ExtensionData::new();
+                for key in INHERITED_SUBAGENT_EXTENSION_STATES {
+                    if let Some(state) = parent.extension_data.extension_states.get(*key) {
+                        inherited
+                            .extension_states
+                            .insert(key.to_string(), state.clone());
+                    }
+                }
+                if !inherited.extension_states.is_empty() {
+                    update = update.extension_data(inherited);
+                }
+            }
+
+            update
                 .apply()
                 .await
                 .map_err(|e| format!("Failed to link subagent to parent session: {}", e))?;
@@ -682,7 +752,7 @@ impl SummonClient {
     }
 
     fn create_delegate_tool(&self) -> Tool {
-        let schema = serde_json::json!({
+        let mut schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "instructions": {
@@ -736,8 +806,7 @@ impl SummonClient {
             }
         });
 
-        Tool::new(
-            "delegate",
+        let mut description =
             "Delegate a task to a subagent that runs independently with its own context.\n\n\
              Modes:\n\
              1. Ad-hoc: Provide `instructions` for a custom task\n\
@@ -750,9 +819,28 @@ impl SummonClient {
              Research (read-only): parallelize freely - delegates explore and report back.\n\
              Work (writes): partition files strictly - no two delegates touch the same file.\n\n\
              Decompose → async delegates → load(taskId) for each → synthesize."
-                .to_string(),
-            schema.as_object().unwrap().clone(),
-        )
+                .to_string();
+
+        if subagent_resume_enabled() {
+            if let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                props.insert(
+                    "subagent_session_id".to_string(),
+                    serde_json::json!({
+                        "type": "string",
+                        "description": "Optional subagent session ID to resume a previous subagent session."
+                    }),
+                );
+            }
+            description.push_str(
+                "\n\n\
+                 Resuming Sessions:\n\
+                 - If a prior delegate call returned a `[Subagent Session ID: <id>]` and you need to \
+                 continue that flow (e.g., to answer a question the subagent asked), pass that ID as \
+                 `subagent_session_id`. This lets the subagent resume with its history.",
+            );
+        }
+
+        Tool::new("delegate", description, schema.as_object().unwrap().clone())
     }
 
     async fn get_working_dir(&self, session_id: &str) -> PathBuf {
@@ -1384,9 +1472,22 @@ impl SummonClient {
         .with_use_login_shell_path(self.context.use_login_shell_path);
         agent_config.is_subagent = true;
 
-        let subagent_session = self
-            .create_subagent_session(&task_config, "Delegated task".to_string())
-            .await?;
+        let resume_id = subagent_resume_enabled()
+            .then(|| params.subagent_session_id.clone())
+            .flatten();
+
+        let subagent_session = match resume_id {
+            Some(id) => self
+                .context
+                .session_manager
+                .get_session(&id, true)
+                .await
+                .map_err(|e| format!("Failed to load existing subagent session {}: {}", id, e))?,
+            None => {
+                self.create_subagent_session(&task_config, "Delegated task".to_string())
+                    .await?
+            }
+        };
 
         let subagent_session_id = subagent_session.id.clone();
 
@@ -1413,11 +1514,18 @@ impl SummonClient {
         let mut meta = MetaObject::new();
         meta.0.insert(
             "subagent_session_id".to_string(),
-            serde_json::Value::String(subagent_session_id),
+            serde_json::Value::String(subagent_session_id.clone()),
         );
 
         match result {
             Ok(text) => {
+                // With resume enabled the id also goes in the visible text, so the
+                // model can pass it back as `subagent_session_id` to continue.
+                let text = if subagent_resume_enabled() {
+                    format!("{}\n\n[Subagent Session ID: {}]", text, subagent_session_id)
+                } else {
+                    text
+                };
                 Ok(CallToolResult::success(vec![ContentBlock::text(text)]).with_meta(Some(meta)))
             }
             Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
@@ -1829,6 +1937,17 @@ impl SummonClient {
             &provider_name,
             provider_default_model,
         )?;
+
+        // A tenant-scoped key on the parent session must also drive the subagent's
+        // provider, otherwise the subagent would silently run on the global
+        // credentials instead of the caller's. Failing loudly beats using the
+        // wrong tenant's key, so this error propagates.
+        if let Some((api_key, host)) = session_provider_credentials(session) {
+            let provider =
+                providers::create_with_api_key(&provider_name, &api_key, host.as_deref())?;
+            return Ok((provider, model_config));
+        }
+
         let provider = match provider_entry {
             Ok(entry) => entry.create(extensions.to_vec()).await?,
             Err(error) => {

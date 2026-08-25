@@ -631,10 +631,12 @@ impl SessionManager {
             .filter(|m| matches!(m.role, Role::User) && m.is_user_visible())
             .count();
 
+        // A session with no user messages has nothing to name from, so skip it
+        // rather than asking the model to name an empty conversation.
         let should_generate_name = if provider.manages_own_context() {
             user_message_count == 1
         } else {
-            user_message_count <= MSG_COUNT_FOR_SESSION_NAME_GENERATION
+            user_message_count > 0 && user_message_count <= MSG_COUNT_FOR_SESSION_NAME_GENERATION
         };
 
         if should_generate_name {
