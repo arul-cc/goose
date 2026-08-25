@@ -4101,4 +4101,164 @@ You review code."#;
             .unwrap();
         assert!(extract_text(&result.content[0]).contains("final output"));
     }
+
+    // ---- §12 ComplianceCow: subagent multi-tenancy -------------------------
+
+    fn session_with_ws_headers(headers: serde_json::Value) -> crate::session::Session {
+        let mut extension_data = crate::session::ExtensionData::new();
+        extension_data.set_extension_state("websocket_headers", "v0", headers);
+        crate::session::Session {
+            extension_data,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn session_provider_credentials_extracts_tenant_key_and_host() {
+        let session = session_with_ws_headers(serde_json::json!({
+            "X-Api-Key": "tenant-key",
+            "x-anthropic-host": "https://api.deepseek.com/anthropic",
+            "x-unrelated": "ignored",
+        }));
+
+        let (key, host) =
+            session_provider_credentials(&session).expect("tenant credentials must be found");
+        assert_eq!(key, "tenant-key", "header lookup must be case-insensitive");
+        assert_eq!(host.as_deref(), Some("https://api.deepseek.com/anthropic"));
+    }
+
+    #[test]
+    fn session_provider_credentials_returns_none_without_api_key() {
+        // Headers present but no key: the subagent should fall through to the
+        // normal provider path rather than half-configuring itself.
+        let session = session_with_ws_headers(serde_json::json!({ "x-tenant": "acme" }));
+        assert!(session_provider_credentials(&session).is_none());
+
+        assert!(
+            session_provider_credentials(&crate::session::Session::default()).is_none(),
+            "a session with no websocket_headers has no tenant credentials"
+        );
+    }
+
+    /// A tenant key must take priority over reusing the parent's provider. If it
+    /// cannot be honoured the call must fail rather than silently running the
+    /// subagent on the global credentials of another tenant.
+    #[tokio::test]
+    async fn resolve_provider_never_falls_back_to_parent_when_tenant_key_present() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent_provider: Arc<dyn crate::providers::base::Provider> = Arc::new(
+            crate::providers::testprovider::TestProvider::new_replaying(
+                temp_dir.path().join("records.json").display().to_string(),
+            )
+            .unwrap(),
+        );
+        let extension_manager = Arc::new(
+            crate::agents::extension_manager::ExtensionManager::new_without_provider(
+                temp_dir.path().to_path_buf(),
+            ),
+        );
+        *extension_manager.get_provider().lock().await = Some(Arc::clone(&parent_provider));
+        let mut context = extension_manager.get_context().clone();
+        context.extension_manager = Some(Arc::downgrade(&extension_manager));
+        let client = SummonClient::new(context).unwrap();
+
+        let mut session = session_with_ws_headers(serde_json::json!({
+            "x-api-key": "tenant-key",
+        }));
+        session.provider_name = Some(parent_provider.get_name().to_string());
+        session.model_config = Some(goose_providers::model::ModelConfig::new("test-model"));
+
+        let params = DelegateParams {
+            provider: Some(parent_provider.get_name().to_string()),
+            model: Some("test-model".to_string()),
+            ..Default::default()
+        };
+
+        let result = client
+            .resolve_provider(&params, &empty_recipe(), &session, &[])
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a tenant key for a provider create_with_api_key cannot build must error, \
+             not silently reuse the parent provider"
+        );
+    }
+
+    /// The subagent must inherit exactly the parent's tenant state, so its own
+    /// MCP calls carry the same identity — and nothing else.
+    #[tokio::test]
+    async fn subagent_session_inherits_only_parent_tenant_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let session_manager = Arc::new(crate::session::SessionManager::new(
+            temp_dir.path().to_path_buf(),
+        ));
+        let mut context = create_test_context();
+        context.session_manager = Arc::clone(&session_manager);
+        let client = SummonClient::new(context).unwrap();
+
+        let parent = session_manager
+            .create_session(
+                temp_dir.path().to_path_buf(),
+                "parent".to_string(),
+                SessionType::User,
+                GooseMode::Auto,
+            )
+            .await
+            .unwrap();
+
+        let mut parent_state = crate::session::ExtensionData::new();
+        parent_state.set_extension_state(
+            "websocket_headers",
+            "v0",
+            serde_json::json!({ "x-api-key": "tenant-key" }),
+        );
+        parent_state.set_extension_state("cow_tenant", "v0", serde_json::json!({ "id": "acme" }));
+        parent_state.set_extension_state("todo", "v0", serde_json::json!({ "items": [] }));
+        session_manager
+            .update(&parent.id)
+            .extension_data(parent_state)
+            .apply()
+            .await
+            .unwrap();
+
+        let provider: Arc<dyn crate::providers::base::Provider> = Arc::new(
+            crate::providers::testprovider::TestProvider::new_replaying(
+                temp_dir.path().join("records.json").display().to_string(),
+            )
+            .unwrap(),
+        );
+        let task_config = TaskConfig::new(
+            provider,
+            goose_providers::model::ModelConfig::new("test-model"),
+            &parent.id,
+            temp_dir.path(),
+            vec![],
+        );
+
+        let child = client
+            .create_subagent_session(&task_config, "child".to_string())
+            .await
+            .unwrap();
+
+        let child = session_manager.get_session(&child.id, false).await.unwrap();
+        let states = &child.extension_data.extension_states;
+
+        assert_eq!(
+            child
+                .extension_data
+                .get_extension_state("websocket_headers", "v0")
+                .and_then(|v| v.get("x-api-key").cloned()),
+            Some(serde_json::json!("tenant-key")),
+            "§4 depends on the subagent inheriting the forwarded headers"
+        );
+        assert!(
+            states.contains_key("cow_tenant.v0"),
+            "tenant context must be inherited"
+        );
+        assert!(
+            !states.contains_key("todo.v0"),
+            "only tenant state is inherited; unrelated parent state must not leak"
+        );
+    }
 }
