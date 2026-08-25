@@ -412,6 +412,11 @@ pub enum GooseExtension {
         /// Tool allowlist for this extension. Omit this field to allow all tools.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         available_tools: Option<Vec<String>>,
+        /// Session `websocket_headers.v0` entries with these names
+        /// (case-insensitive) are forwarded as HTTP headers on every request to
+        /// this MCP server. Omit or leave empty to forward nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_headers: Vec<String>,
     },
 }
 

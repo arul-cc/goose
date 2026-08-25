@@ -185,6 +185,13 @@
               },
               "description": "Tool allowlist for this extension. Omit this field to allow all tools."
             },
+            "allowed_headers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Session `websocket_headers.v0` entries with these names\n(case-insensitive) are forwarded as HTTP headers on every request to\nthis MCP server. Omit or leave empty to forward nothing."
+            },
             "type": {
               "type": "string",
               "const": "mcp"
