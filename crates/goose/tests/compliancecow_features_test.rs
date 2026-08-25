@@ -369,3 +369,125 @@ fn allow_listed_session_headers_are_forwarded_to_the_mcp_server() {
         );
     });
 }
+
+// ---- request-shaping features (no server, no network) ---------------------
+
+fn json_contains_key(value: &serde_json::Value, key: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key(key) || map.values().any(|v| json_contains_key(v, key))
+        }
+        serde_json::Value::Array(items) => items.iter().any(|v| json_contains_key(v, key)),
+        _ => false,
+    }
+}
+
+fn sample_messages() -> Vec<goose::conversation::message::Message> {
+    vec![goose::conversation::message::Message::user().with_text("hello")]
+}
+
+/// §6: DeepSeek's Anthropic-compatible endpoint rejects `cache_control`, so
+/// ANTHROPIC_DISABLE_CACHE must strip it from the whole request body.
+#[test]
+#[serial]
+fn anthropic_disable_cache_env_strips_cache_control() {
+    use goose_providers::formats::anthropic::{create_request, AnthropicFormatOptions};
+    use goose_providers::model::ModelConfig;
+
+    let model = ModelConfig::new("claude-sonnet-4-5");
+    let messages = sample_messages();
+
+    {
+        let _env = env_lock::lock_env([("ANTHROPIC_DISABLE_CACHE", None::<&str>)]);
+        let body = create_request(
+            "anthropic",
+            &model,
+            "system",
+            &messages,
+            &[],
+            AnthropicFormatOptions::default(),
+        )
+        .expect("request builds");
+        assert!(
+            json_contains_key(&body, "cache_control"),
+            "baseline: caching is on by default, otherwise this test proves nothing"
+        );
+    }
+
+    {
+        let _env = env_lock::lock_env([("ANTHROPIC_DISABLE_CACHE", Some("1"))]);
+        let body = create_request(
+            "anthropic",
+            &model,
+            "system",
+            &messages,
+            &[],
+            AnthropicFormatOptions::default(),
+        )
+        .expect("request builds");
+        assert!(
+            !json_contains_key(&body, "cache_control"),
+            "ANTHROPIC_DISABLE_CACHE must remove every cache_control block"
+        );
+    }
+}
+
+/// §9: models matching GOOSE_THINKING_DISABLE_MODELS (default `deepseek-v4`)
+/// get `thinking: disabled` on the openai-compatible endpoint, so DeepSeek does
+/// not bill reasoning tokens. An explicit directive still wins.
+#[test]
+fn deepseek_v4_defaults_to_thinking_disabled_on_openai_format() {
+    use goose_providers::formats::openai::create_request;
+    use goose_providers::images::ImageFormat;
+    use goose_providers::model::ModelConfig;
+
+    let messages = sample_messages();
+    let build = |model: &ModelConfig| {
+        create_request(model, "system", &messages, &[], &ImageFormat::OpenAi, false)
+            .expect("request builds")
+    };
+
+    let deepseek = build(&ModelConfig::new("deepseek-v4-pro"));
+    assert_eq!(
+        deepseek.get("thinking"),
+        Some(&serde_json::json!({ "type": "disabled" })),
+        "deepseek-v4 models must default to thinking disabled"
+    );
+
+    let other = build(&ModelConfig::new("gpt-4o"));
+    assert!(
+        other.get("thinking").is_none(),
+        "non-matching models must be left alone"
+    );
+}
+
+/// Branding: the agent must identify itself as moocp/ComplianceCow. Upstream
+/// owns these files, so a rebase silently reintroducing "goose"/"AAIF" is a
+/// regression this catches.
+#[test]
+fn agent_identity_is_rebranded_to_moocp() {
+    for (name, prompt) in [
+        ("system.md", include_str!("../src/prompts/system.md")),
+        (
+            "subagent_system.md",
+            include_str!("../src/prompts/subagent_system.md"),
+        ),
+        (
+            "tiny_model_system.md",
+            include_str!("../src/prompts/tiny_model_system.md"),
+        ),
+    ] {
+        assert!(
+            prompt.contains("moocp"),
+            "{name} must identify the agent as moocp"
+        );
+        assert!(
+            prompt.contains("ComplianceCow"),
+            "{name} must attribute the agent to ComplianceCow"
+        );
+        assert!(
+            !prompt.contains("AAIF"),
+            "{name} still credits AAIF — the rebrand was lost in a sync"
+        );
+    }
+}
