@@ -173,6 +173,37 @@ feature-by-feature reconciliation. New crate layout:
   `GOOSE_DISABLE_TELEMETRY=1` in deployment. Desktop/Electron branding (distros
   guide §D) is N/A — we ship goose-server + our own UI (§E).
 
+### §12 Subagent (summon) multi-tenancy — ported 2026-07-13
+
+From Surendhar's commits `49eeb4d9`, `d7cf62a6`, `7252e54e` (written on the
+pre-ACP base `0764f508c`, forward-ported onto post-ACP upstream).
+
+- **Subagent inherits tenant context.** `create_subagent_session`
+  (`agents/platform_extensions/summon.rs`) copies the parent's
+  `cow_tenant.v0` + `websocket_headers.v0` (`INHERITED_SUBAGENT_EXTENSION_STATES`)
+  onto the subagent session, so the subagent's own MCP calls forward allow-listed
+  headers to cow-mcp. **Without this, §4 is broken for subagents.**
+- **Subagent uses the tenant's API key.** `resolve_provider` reads `x-api-key`
+  (+ `x-openai-host`/`x-anthropic-host`/`x-host`) from the parent session via
+  `session_provider_credentials()` and builds the provider with
+  `create_with_api_key` (§1-3). Errors propagate deliberately — running a subagent
+  on another tenant's global key is worse than failing.
+- **Subagent session resume.** `DelegateParams.subagent_session_id`, env-gated by
+  **`GOOSE_SUBAGENT_RESUME`** (default off); when on, the delegate tool exposes the
+  param and the result text carries `[Subagent Session ID: <id>]`.
+- **Session naming:** skip generation when a session has no user messages.
+- **`GOOSE_LOG_CONSOLE`** enables CLI console logging (`goose-cli/src/logging.rs`).
+
+**Deliberately NOT ported** from those commits:
+- `reply_parts.rs` `tracing::info!("Sending LLM Payload: …")` — logs the full system
+  prompt and every message at info level. Unacceptable for a multi-tenant GRC
+  deployment (writes tenant conversation content to logs) and contrary to the
+  repo's logging guidance. Use `GOOSE_LOG_CONSOLE` + debug-level tracing instead.
+- Removal of the recipe-title session-naming branch — a product decision, not a bug
+  fix; upstream asserts that behavior in
+  `test_maybe_update_name_uses_recipe_title_for_recipe_session`. Raise it if
+  ComplianceCow wants LLM-generated names for recipe sessions.
+
 ### Operational tweaks (not in §1-11, found via identifier audit)
 
 - **Configurable SQLite pool size.** `crates/goose/src/session/session_manager.rs` —
