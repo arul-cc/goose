@@ -225,6 +225,7 @@ fn config_to_goose_extension(
             scopes: vec![],
             bundled: *bundled,
             available_tools: available_tools_to_wire(available_tools),
+            allowed_headers: Vec::new(),
         },
         ExtensionConfig::StreamableHttp {
             name,
@@ -239,6 +240,7 @@ fn config_to_goose_extension(
             scopes,
             bundled,
             available_tools,
+            allowed_headers,
             ..
         } => {
             let headers = headers
@@ -258,6 +260,7 @@ fn config_to_goose_extension(
                 scopes: scopes.clone(),
                 bundled: *bundled,
                 available_tools: available_tools_to_wire(available_tools),
+                allowed_headers: allowed_headers.clone(),
             }
         }
     };
@@ -313,6 +316,7 @@ fn goose_extension_to_config(
             scopes,
             bundled,
             available_tools,
+            allowed_headers,
         } => match *server {
             McpServer::Stdio(stdio) => {
                 if socket.is_some() {
@@ -362,7 +366,7 @@ fn goose_extension_to_config(
                 scopes,
                 bundled,
                 available_tools: available_tools.unwrap_or_default(),
-                allowed_headers: Vec::new(),
+                allowed_headers,
             },
             McpServer::Sse(_) => {
                 return Err(agent_client_protocol::Error::invalid_params()
@@ -567,6 +571,7 @@ mod tests {
             scopes,
             bundled,
             available_tools,
+            allowed_headers: _,
         } = extension
         else {
             panic!("expected mcp extension");
@@ -632,6 +637,7 @@ mod tests {
             scopes,
             bundled,
             available_tools,
+            allowed_headers: _,
         } = extension
         else {
             panic!("expected mcp extension");
@@ -674,6 +680,7 @@ mod tests {
             scopes: vec![],
             bundled: Some(true),
             available_tools: Some(vec!["run".to_string()]),
+            allowed_headers: Vec::new(),
         };
 
         let conversion = goose_extension_to_config(extension).expect("conversion should succeed");
@@ -733,6 +740,7 @@ mod tests {
             scopes: vec![],
             bundled: Some(true),
             available_tools: None,
+            allowed_headers: Vec::new(),
         };
 
         let conversion = goose_extension_to_config(extension).expect("conversion should succeed");
@@ -779,6 +787,7 @@ mod tests {
             scopes: vec!["scope.read".to_string()],
             bundled: Some(true),
             available_tools: Some(vec!["fetch".to_string()]),
+            allowed_headers: Vec::new(),
         };
 
         let conversion = goose_extension_to_config(extension).expect("conversion should succeed");
@@ -909,6 +918,7 @@ mod tests {
             scopes: vec![],
             bundled: None,
             available_tools: None,
+            allowed_headers: Vec::new(),
         };
 
         assert!(goose_extension_to_config(extension).is_err());
