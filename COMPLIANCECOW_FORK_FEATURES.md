@@ -294,6 +294,7 @@ half of the preservation gate in `.agents/workflows/sync-upstream.md`.
 |---|---|
 | §4 injection (`extension_data/set`, incl. merge on token rotation) | `set_session_extension_data_persists_and_merges_websocket_headers` |
 | §4 forwarding (allow-listed headers reach the MCP server; others never do) | `allow_listed_session_headers_are_forwarded_to_the_mcp_server` |
+| §4 forwarding for an extension registered **over ACP** (not config.yaml) | `extension_registered_over_acp_forwards_allow_listed_headers` |
 | §1-3 tenant api_key/host, §6 `metadata.user_id`, §9 `thinking` params | `update_session_provider_applies_tenant_key_request_params_and_user_id` |
 | §6 `ANTHROPIC_DISABLE_CACHE` | `anthropic_disable_cache_env_strips_cache_control` |
 | §9 deepseek-v4 thinking default | `deepseek_v4_defaults_to_thinking_disabled_on_openai_format` |

@@ -491,3 +491,117 @@ fn agent_identity_is_rebranded_to_moocp() {
         );
     }
 }
+
+/// The allowed_headers gap: an extension registered *over ACP* (not declared in
+/// config.yaml) must be able to forward allow-listed session headers too —
+/// otherwise CowGooseService could only ever get §4 by editing server config.
+#[test]
+#[serial]
+fn extension_registered_over_acp_forwards_allow_listed_headers() {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerHttp};
+    use goose::acp::custom_requests::GooseExtension;
+
+    let root_path = TEST_ROOT.path().to_string_lossy().to_string();
+    let _env = env_lock::lock_env([
+        ("GOOSE_PATH_ROOT", Some(root_path.as_str())),
+        ("GOOSE_DISABLE_KEYRING", Some("1")),
+    ]);
+
+    run_test(async move {
+        let log = HeaderLog::default();
+        let mcp_url = spawn_recording_mcp(log.clone()).await;
+
+        // Deliberately NO extension in config.yaml — it is added over ACP below.
+        let data_root = Paths::data_dir();
+        std::fs::create_dir_all(&data_root).unwrap();
+        std::fs::write(
+            data_root.join(CONFIG_YAML_NAME),
+            "GOOSE_MODEL: gpt-4o\nGOOSE_PROVIDER: openai\nGOOSE_DISABLE_KEYRING: true\n",
+        )
+        .unwrap();
+
+        let openai = common_tests::fixtures::OpenAiFixture::new(
+            vec![],
+            Arc::new(EnforceSessionId::default()),
+        )
+        .await;
+        let mut conn = AcpServerConnection::new(
+            TestConnectionConfig {
+                data_root: data_root.clone(),
+                ..Default::default()
+            },
+            openai,
+        )
+        .await;
+
+        let session = conn.new_session().await.expect("new session");
+        let sid = {
+            use common_tests::fixtures::Session as _;
+            session.session.session_id().0.to_string()
+        };
+
+        send_custom(
+            conn.cx(),
+            SET_EXTENSION_DATA,
+            serde_json::json!({
+                "sessionId": sid,
+                "extensionData": {
+                    "websocket_headers.v0": {
+                        "x-api-key": "acp-added-key",
+                        "x-not-allow-listed": "must-not-be-forwarded",
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("extension_data/set should succeed");
+
+        let extension = GooseExtension::Mcp {
+            server: Box::new(McpServer::Http(McpServerHttp::new("acp-added", &mcp_url))),
+            env_keys: Vec::new(),
+            description: Some("added over ACP".to_string()),
+            timeout: Some(30),
+            socket: None,
+            client_id: None,
+            client_secret_key: None,
+            scopes: Vec::new(),
+            bundled: None,
+            available_tools: None,
+            allowed_headers: vec!["x-api-key".to_string()],
+        };
+
+        send_custom(
+            conn.cx(),
+            "_goose/unstable/session/extensions/add",
+            serde_json::json!({
+                "sessionId": sid,
+                "extension": serde_json::to_value(&extension).unwrap(),
+            }),
+        )
+        .await
+        .expect("adding the extension over ACP should succeed");
+
+        let requests = log.requests();
+        let forwarded = requests
+            .iter()
+            .find(|headers| headers.contains_key("x-api-key"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "an ACP-registered extension must forward its allow-listed headers; \
+                     saw {} requests: {:?}",
+                    requests.len(),
+                    requests
+                )
+            });
+        assert_eq!(
+            forwarded.get("x-api-key").map(String::as_str),
+            Some("acp-added-key")
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|headers| !headers.contains_key("x-not-allow-listed")),
+            "the allow-list must still filter for ACP-registered extensions"
+        );
+    });
+}
