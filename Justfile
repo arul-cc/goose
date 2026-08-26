@@ -151,6 +151,28 @@ run-server:
     @echo "Running external ACP backend..."
     GOOSE_SERVER__SECRET_KEY="${GOOSE_SERVER__SECRET_KEY:-test}" cargo run -p goose-cli --bin goose -- serve --platform desktop --enable-scheduler --host 127.0.0.1 --port 3000
 
+# --- ComplianceCow fork ------------------------------------------------------
+# `run-server` above is upstream's: authenticated, desktop platform. The fork's
+# setup is unauthenticated on the port CowGooseService dials. See
+# COMPLIANCECOW_FORK_FEATURES.md.
+
+# Build goose (handles the v8/SSL failure; refuses to kill a running server)
+cow-build *ARGS:
+    ./scripts/build-goose.sh {{ARGS}}
+
+# Run goose serve for CowGooseService (port read from its server.yaml)
+cow-serve *ARGS:
+    ./scripts/run-goose.sh {{ARGS}}
+
+# Post-sync verification: did fork code vanish, and does it still behave?
+cow-verify:
+    python3 scripts/fork-marker-sweep.py
+    cargo test -p goose --test compliancecow_features_test
+
+# Full-stack check — needs goose + CowGooseService up and CCOW_SECURITY_CONTEXT set
+cow-validate:
+    python3 scripts/validate-compliancecow.py
+
 # Check if generated ACP schema and TypeScript types are up-to-date
 check-acp-schema: generate-acp-types
     #!/usr/bin/env bash
