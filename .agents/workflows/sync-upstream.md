@@ -116,12 +116,35 @@ source bin/activate-hermit
 cargo fmt
 cargo build
 cargo clippy --all-targets -- -D warnings
-cargo test -p goose-provider-types --lib format   # cache_control / thinking format tests
+cargo test -p goose-provider-types --lib format          # cache_control / thinking format tests
+cargo test -p goose --test compliancecow_features_test   # the fork's own feature gate
 ```
+
+`compliancecow_features_test.rs` is the gate that matters here: it is **fork-owned**,
+so a rebase cannot quietly revert us the way it can with a test that lives inside an
+upstream file. When a sync reverts fork behaviour whose upstream test asserts the
+opposite, move our assertion into that file rather than editing upstream's test in
+place — that is how the §13 session-naming regression got through once.
+
 If any goose-server route or request type changed, regenerate the API spec:
 ```bash
 just generate-openapi
 ```
+
+### Full-stack validation
+Unit tests do not catch wiring: a feature can compile, pass its tests, and still
+never reach cow-mcp. With `goose serve` and CowGooseService both up:
+
+```bash
+export CCOW_SECURITY_CONTEXT='<the security-context JSON>'
+python3 scripts/validate-compliancecow.py
+```
+
+It exercises the session-admin ACP methods, §4 header forwarding (with a negative
+control that must fail), tool results actually reaching the browser, and §1-3 / §6 /
+§9 / §12 / §13 as goose persisted them. Anything it cannot reach is reported SKIP,
+never PASS, so a partial run can't be mistaken for a clean one — read the skip list
+before calling a sync verified.
 
 ## 7. Verify the CowGooseService contract
 The Go bridge depends on these goose-server endpoints — all must still exist:

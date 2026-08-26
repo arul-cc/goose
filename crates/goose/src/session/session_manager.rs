@@ -597,15 +597,6 @@ impl SessionManager {
             return Ok(None);
         }
 
-        if let Some(recipe) = &session.recipe {
-            let name = recipe.title.trim().to_string();
-            if name.is_empty() || session.name == name {
-                return Ok(None);
-            }
-
-            return Ok(Some(self.system_generated_name_update(id, name).await?));
-        }
-
         let model_config = match session.model_config.clone() {
             Some(model_config) => model_config,
             None => {
@@ -3380,8 +3371,12 @@ mod tests {
         assert!(reloaded.user_set_name);
     }
 
+    // ComplianceCow divergence from upstream: a recipe session is named from its
+    // conversation, not from the recipe title. Every ComplianceCow session runs a
+    // `cow-<type>` recipe, so upstream's behaviour collapsed every session in the
+    // list to one identical name.
     #[tokio::test]
-    async fn test_maybe_update_name_uses_recipe_title_for_recipe_session() {
+    async fn test_maybe_update_name_generates_name_for_recipe_session() {
         let temp_dir = TempDir::new().unwrap();
         let sm = SessionManager::new(temp_dir.path().to_path_buf());
 
@@ -3408,18 +3403,51 @@ mod tests {
             .unwrap();
         assert_eq!(
             update.as_ref().map(|update| update.name.as_str()),
-            Some("Recipe title")
+            Some(GENERATED_SESSION_NAME),
+            "a recipe session must be named from its conversation, not the recipe"
         );
 
         let reloaded = sm.get_session(&session.id, false).await.unwrap();
-        assert_eq!(reloaded.name, "Recipe title");
+        assert_eq!(reloaded.name, GENERATED_SESSION_NAME);
         assert!(!reloaded.user_set_name);
+    }
+
+    // A title the user typed still wins over conversation-based naming, recipe or not.
+    #[tokio::test]
+    async fn test_maybe_update_name_respects_user_set_name_on_recipe_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+
+        let session = sm
+            .create_session(
+                temp_dir.path().to_path_buf(),
+                "New Chat".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .unwrap();
+
+        sm.update(&session.id)
+            .recipe(Some(test_recipe("Recipe title")))
+            .apply()
+            .await
+            .unwrap();
+        sm.update(&session.id)
+            .user_provided_name("Manual title".to_string())
+            .apply()
+            .await
+            .unwrap();
+        add_user_message(&sm, &session.id).await;
 
         let update = sm
             .maybe_update_name(&session.id, naming_test_provider())
             .await
             .unwrap();
         assert!(update.is_none());
+
+        let reloaded = sm.get_session(&session.id, false).await.unwrap();
+        assert_eq!(reloaded.name, "Manual title");
     }
 
     #[tokio::test]
