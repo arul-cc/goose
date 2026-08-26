@@ -150,8 +150,8 @@ async def check_acp_layer(args, sec_ctx):
 # --------------------------------------------------------------------------
 
 async def drive_bridge(args, headers, prompt):
-    """One turn through the bridge. Returns (frame_counts, tool_events, text_len)."""
-    counts, tools, text_len = {}, [], 0
+    """One turn through the bridge. Returns (counts, tools, text_len, session_id, errors)."""
+    counts, tools, text_len, errors = {}, [], 0, []
     url = args.cgs_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/") + "/goose/ws"
     session_id = str(uuid.uuid4())
     async with websockets.connect(url, additional_headers=headers, max_size=None) as ws:
@@ -174,9 +174,12 @@ async def drive_bridge(args, headers, prompt):
                 body = json.dumps(frame.get("data"), default=str)
                 unauthorized = any(m in body.lower() for m in ("401", "unauthor", "forbidden"))
                 tools.append({"bytes": len(body), "unauthorized": unauthorized})
-            elif t in ("complete", "error"):
+            elif t == "error":
+                errors.append(json.dumps(frame.get("data") or frame.get("content") or frame)[:300])
                 break
-    return counts, tools, text_len, session_id
+            elif t == "complete":
+                break
+    return counts, tools, text_len, session_id, errors
 
 
 async def check_bridge(args, sec_ctx):
@@ -197,7 +200,7 @@ async def check_bridge(args, sec_ctx):
     prompt = args.prompt
 
     try:
-        counts, tools, text_len, cow_sid = await drive_bridge(args, headers, prompt)
+        counts, tools, text_len, cow_sid, errors = await drive_bridge(args, headers, prompt)
     except Exception as e:
         record("§4", "bridge turn (with headers)", FAIL, f"{type(e).__name__}: {e}")
         return None
@@ -205,6 +208,12 @@ async def check_bridge(args, sec_ctx):
     if counts.get("__timeout__"):
         record("§4", "bridge turn (with headers)", FAIL, "timed out waiting for completion")
         return None
+
+    if errors:
+        record("§4", "bridge turn (with headers)", FAIL,
+               f"bridge returned an error frame: {errors[0]} — this is the bridge failing to "
+               "start the turn, not a header-forwarding problem; check CowGooseService's log")
+        return cow_sid
 
     authorized = [t for t in tools if not t["unauthorized"]]
     if not tools:
@@ -231,7 +240,7 @@ async def check_bridge(args, sec_ctx):
 
     # Negative control: same prompt, no headers, must NOT be authorized.
     try:
-        _, neg_tools, _, _ = await drive_bridge(args, {}, prompt)
+        _, neg_tools, _, _, _ = await drive_bridge(args, {}, prompt)
         if not neg_tools:
             record("§4", "negative control (no headers)", SKIP, "model called no tools")
         elif all(t["unauthorized"] for t in neg_tools):
@@ -257,12 +266,24 @@ def check_persisted_state(args, sec_ctx):
         return
     # WAL: a plain copy misses recent writes, so read the live file read-only.
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    row = con.execute("""SELECT id, name, provider_name, model_config_json, extension_data, recipe_json
-                         FROM sessions WHERE extension_data LIKE '%websocket_headers%'
-                         ORDER BY created_at DESC LIMIT 1""").fetchone()
+    # Prefer a bridge-created session: cow_tenant.v0 is written only by
+    # CowGooseService, whereas websocket_headers.v0 is also planted by this
+    # script's own ACP probe — matching on that alone inspects our own probe and
+    # then reports §12/§13 missing on a session that was never going to have them.
+    q = """SELECT id, name, provider_name, model_config_json, extension_data, recipe_json
+           FROM sessions WHERE extension_data LIKE '%{}%'
+           ORDER BY created_at DESC LIMIT 1"""
+    row = con.execute(q.format("cow_tenant.v0")).fetchone()
+    from_bridge = row is not None
+    if not row:
+        row = con.execute(q.format("websocket_headers")).fetchone()
     if not row:
         record("state", "a tenant session to inspect", SKIP, "none carry websocket_headers.v0 yet")
         return
+    if not from_bridge:
+        record("state", "bridge-created session", SKIP,
+               "no session carries cow_tenant.v0 — inspecting an ACP-only session, "
+               "so §12/§13 cannot be judged from it")
     sid, name, provider, model_json, ext_json, recipe_json = row
     model = json.loads(model_json) if model_json else {}
     ext = json.loads(ext_json) if ext_json else {}
@@ -294,6 +315,8 @@ def check_persisted_state(args, sec_ctx):
     if tenant and tenant.get("session_type"):
         ids = "populated" if tenant.get("domain_id") and tenant.get("user_id") else "EMPTY (OSC_GOOSE=true?)"
         record("§12", "cow_tenant.v0", PASS, f"session_type={tenant['session_type']}, domain/user {ids}")
+    elif not from_bridge:
+        record("§12", "cow_tenant.v0", SKIP, "no bridge-created session to inspect")
     else:
         record("§12", "cow_tenant.v0", FAIL, f"got {tenant}")
 
