@@ -310,16 +310,19 @@ so a green run is meaningful rather than vacuous.
 > needs `npm install` in `ui/sdk` first. Harmless for us (our UI does not use
 > goose's TS SDK), but `just check-acp-schema` will fail until it is run.
 
-> **§4 verified end-to-end (2026-08-26)** against live goose + cow-mcp with real
-> tenant credentials: with `websocket_headers.v0` planted the tool returned 386
-> rules; without it, 401. Note this required adding
-> `allowed_headers: [Authorization, X-Cow-Security-Context]` to the `compliancecow`
-> extension in `config.yaml` — **§4 forwards nothing without it.**
+> **§4, §6, §9 and §1-3 verified end-to-end (2026-08-26)** against live goose +
+> cow-mcp with real tenant credentials:
+> - **§4** — with `websocket_headers.v0` planted the compliancecow tool returned
+>   386 rules (103KB); the same call with no headers returned 401. Controlled
+>   negative test, so the headers are demonstrably what made the difference.
+> - **§1-3 / §6 / §9** — after `session/provider/update`, the persisted session
+>   shows `provider_name=anthropic`, `request_params.thinking={"type":"disabled"}`
+>   (§9) and `request_params.metadata.user_id` populated from the security
+>   context's `ID` (§6).
 >
-> **§6 caveat found while testing:** `anthropic_user_metadata` expects
-> `X-Cow-Security-Context` to be JSON containing `"ID"`. The real header is an
-> opaque token, so no `metadata.user_id` is attached. Pre-existing (from
-> `1d2dec92f`), but it means §6 is inert in this deployment.
+> **Prerequisite:** the `compliancecow` extension in `config.yaml` needs
+> `allowed_headers: [Authorization, X-Cow-Security-Context]`. It had none, so §4
+> forwarded nothing and every call 401'd. **Production needs this too.**
 
 **Not covered** (needs live infra): the real cow-mcp server, a real LLM provider,
 and CowGooseService driving goose over ACP end-to-end.
