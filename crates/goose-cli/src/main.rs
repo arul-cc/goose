@@ -39,8 +39,15 @@ fn main() -> Result<()> {
         .name("goose-cli-main".to_string())
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
+            // Worker threads get the same 8 MB the main thread above asks for.
+            // Tokio's default is 2 MB, and most of goose's work — agent turns,
+            // ACP request handling — runs on a worker, not on main. A debug
+            // build's frames are large enough that the default overflows
+            // ("thread 'tokio-rt-worker' has overflowed its stack"), which
+            // aborts the process rather than returning an error.
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(8 * 1024 * 1024)
                 .build()
                 .expect("Failed to build Tokio runtime");
             runtime.block_on(run())
