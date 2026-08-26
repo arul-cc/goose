@@ -114,8 +114,8 @@ feature-by-feature reconciliation. New crate layout:
       routes write.
     - **This was missed in the first sync pass** (dropped with §1-3 Layer B),
       which is why headers didn't forward on first test; restored 2026-07-05.
-  - **⚠️ Still needs a full end-to-end integration check** against CowGooseService,
-    but the injection→read→filter→forward path is now complete and compiles.
+  - **Verified end-to-end through CowGooseService on 2026-08-26** — see the
+    full-stack note below.
 - **§9 DeepSeek thinking-disable + v4 models.**
   - `crates/goose-provider-types/src/formats/openai.rs`:
     `thinking_disable_model_patterns()` (env `GOOSE_THINKING_DISABLE_MODELS`,
@@ -324,8 +324,28 @@ so a green run is meaningful rather than vacuous.
 > `allowed_headers: [Authorization, X-Cow-Security-Context]`. It had none, so §4
 > forwarded nothing and every call 401'd. **Production needs this too.**
 
-**Not covered** (needs live infra): the real cow-mcp server, a real LLM provider,
-and CowGooseService driving goose over ACP end-to-end.
+> **Full-stack run (2026-08-26)** — browser WS → CowGooseService (`COWGOOSE_USE_ACP=1`)
+> → ACP → `goose serve` → cow-mcp, with a live tenant security context:
+> - Recipe selection over ACP works: goose stored `recipe_json.title =
+>   "ComplianceCow Rules Specialist"` for session type `rules`.
+> - **§4** — `websocket_headers.v0` carried `authorization` +
+>   `x-cow-security-context`; tools returned 37,795 / 3,437 byte authorized
+>   payloads. Negative control with no headers: 401 from cow-mcp.
+> - **§12** — `cow_tenant.v0` written with `session_type` + `original_session_id`.
+> - Streaming to the browser: 391 `response`, 3 `tool_request`, 3 `tool_response`,
+>   1 `complete`.
+>
+> This run also exposed a CowGooseService bug (fixed there, not in goose): goose
+> sends `session/update.content` as an object on message chunks but as a **list**
+> on `tool_call_update`. The Go client modelled only the object form, so every
+> tool result failed to decode and was silently discarded — the browser saw tool
+> requests that never resolved. See `cowgooseservice/TRACK_B_ACP.md`.
+
+**Not covered** (needs infra that was down): the non-OSC path — `cowlangservice`
+(:14600) and Postgres (:5432) were unavailable, so prompty-config provider
+resolution, vault key fetch, and `POST /v1/auth/fetch-user` could not run. That
+path populates `cow_tenant.v0.domain_id` / `user_id`, which are empty under
+`OSC_GOOSE=true`.
 
 ## Running locally (post-ACP: there is no more `goosed`)
 
