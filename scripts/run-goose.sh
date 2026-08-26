@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run `goose serve` for the ComplianceCow setup.
 #
-#   ./scripts/run-goose.sh                  # foreground, port from CowGooseService
+#   ./scripts/run-goose.sh                  # foreground, port 3000 (or COWGOOSE_CONFIG)
 #   ./scripts/run-goose.sh --port 3284
 #   ./scripts/run-goose.sh --background     # detached, logs to /tmp
 #   ./scripts/run-goose.sh --big-stack      # 32MB worker stacks
@@ -12,17 +12,21 @@
 # a local development posture: it binds 127.0.0.1 only. Do not use it on a shared
 # or public host.
 #
-# The port defaults to whatever CowGooseService is configured to dial, read from
-# its configs/server.yaml. That value is the contract between the two processes,
-# and having them disagree presents as a hang rather than an error, so this reads
-# the same file instead of hardcoding a guess.
+# The port is the contract between goose and CowGooseService: when they disagree
+# it presents as a hang, not an error. Point COWGOOSE_CONFIG at that service's
+# configs/server.yaml and this reads the port from it, so the two cannot drift:
+#
+#     export COWGOOSE_CONFIG=/path/to/cowgooseservice/configs/server.yaml
+#
+# Without it the port falls back to 3000; --port always wins.
 
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
 
-CGS_CONFIG="${COWGOOSE_CONFIG:-/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/configs/server.yaml}"
+# No default: a path from one developer's machine is worse than no path at all.
+CGS_CONFIG="${COWGOOSE_CONFIG:-}"
 PROFILE=debug
 PORT=""
 HOST=127.0.0.1
@@ -36,7 +40,7 @@ while [ $# -gt 0 ]; do
     --release)    PROFILE=release; shift ;;
     --background) BACKGROUND=1; shift ;;
     --big-stack)  BIG_STACK=1; shift ;;
-    -h|--help)    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)            echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -59,15 +63,25 @@ if [ -n "$NEWEST_SRC" ]; then
 fi
 
 # --- port -------------------------------------------------------------------
-if [ -z "$PORT" ]; then
+if [ -z "$PORT" ] && [ -n "$CGS_CONFIG" ]; then
   if [ -f "$CGS_CONFIG" ]; then
     PORT="$(sed -n 's/^[[:space:]]*port:[[:space:]]*"\{0,1\}\([0-9]\{1,\}\)"\{0,1\}[[:space:]]*$/\1/p' "$CGS_CONFIG" 2>/dev/null | head -1)"
-    [ -n "$PORT" ] && echo "port $PORT (from CowGooseService's ${CGS_CONFIG##*/})"
+    if [ -n "$PORT" ]; then
+      echo "port $PORT (from COWGOOSE_CONFIG)"
+    else
+      echo "warning: no 'port:' found in $CGS_CONFIG" >&2
+    fi
+  else
+    echo "warning: COWGOOSE_CONFIG points at $CGS_CONFIG, which does not exist" >&2
   fi
 fi
 if [ -z "$PORT" ]; then
   PORT=3000
-  echo "port $PORT (default — could not read $CGS_CONFIG)"
+  if [ -z "$CGS_CONFIG" ]; then
+    echo "port $PORT (default; set COWGOOSE_CONFIG to track CowGooseService's own port)"
+  else
+    echo "port $PORT (default)"
+  fi
 fi
 
 # --- stop whatever is already there -----------------------------------------
