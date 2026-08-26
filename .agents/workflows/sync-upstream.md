@@ -131,6 +131,24 @@ If any goose-server route or request type changed, regenerate the API spec:
 just generate-openapi
 ```
 
+### Fork-marker sweep — run this FIRST
+```bash
+python3 scripts/fork-marker-sweep.py        # -v to list every marker
+```
+
+One second, no services, no credentials. It asserts each piece of fork code is
+still in the file that must contain it, plus the upstream behaviours we
+deliberately removed are still absent.
+
+This catches what no test suite can: a rebase **deleting** fork code. When a
+function or struct field disappears, the tests covering it disappear with it, so
+the suite stays green while the feature is gone — which is precisely how the §4
+injection side was lost in the first sync. A failure prints whether the marker
+turned up elsewhere (relocated, not deleted), and an absent-marker guard whose
+anchor function got renamed fails loudly rather than silently stopping checking.
+
+Adding a fork feature? Add its marker in the same commit.
+
 ### Full-stack validation
 Unit tests do not catch wiring: a feature can compile, pass its tests, and still
 never reach cow-mcp. With `goose serve` and CowGooseService both up:
