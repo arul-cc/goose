@@ -605,3 +605,158 @@ fn extension_registered_over_acp_forwards_allow_listed_headers() {
         );
     });
 }
+
+/// §13 session naming: a recipe-backed session must be named from its
+/// conversation, not from the recipe title.
+///
+/// Every ComplianceCow session runs a `cow-<type>` recipe, so upstream's
+/// behaviour — short-circuit `maybe_update_name` and use `recipe.title` —
+/// collapses every session in the browser's list to one identical name.
+/// Upstream's `test_maybe_update_name_uses_recipe_title_for_recipe_session`
+/// asserts the behaviour we deliberately removed, so this test lives here, in a
+/// fork-owned file, rather than beside it in `session_manager.rs`: a rebase that
+/// restores upstream's version fails HERE instead of silently reverting us. This
+/// exact regression shipped once already (2026-08-26) and was invisible until a
+/// human noticed every session had the same title.
+mod session_naming {
+    use super::*;
+    use async_trait::async_trait;
+    use goose::config::GooseMode;
+    use goose::conversation::message::Message;
+    use goose::providers::base::{
+        stream_from_single_message, MessageStream, Provider, ProviderMetadata,
+    };
+    use goose::recipe::Recipe;
+    use goose::session::session_manager::{SessionManager, SessionType};
+    use goose_providers::conversation::token_usage::{ProviderUsage, Usage};
+    use goose_providers::errors::ProviderError;
+    use goose_providers::model::ModelConfig;
+    use rmcp::model::Tool;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    const NAMED_BY_MODEL: &str = "Rule count request";
+
+    struct NamingProvider;
+
+    #[async_trait]
+    impl Provider for NamingProvider {
+        async fn stream(
+            &self,
+            _model_config: &ModelConfig,
+            _system_prompt: &str,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            Ok(stream_from_single_message(
+                Message::assistant().with_text(NAMED_BY_MODEL),
+                ProviderUsage::new(
+                    "naming-model".to_string(),
+                    Usage::new(Some(1), Some(1), Some(2)),
+                ),
+            ))
+        }
+
+        fn get_name(&self) -> &str {
+            "compliancecow-naming-test"
+        }
+    }
+
+    impl goose::providers::base::ProviderDescriptor for NamingProvider {
+        fn metadata() -> ProviderMetadata {
+            // Built through the constructor rather than a struct literal so a
+            // new upstream field does not break this test.
+            ProviderMetadata::new(
+                "compliancecow-naming-test",
+                "ComplianceCow naming test provider",
+                "Returns a fixed session name",
+                "naming-model",
+                vec![],
+                "",
+                vec![],
+            )
+        }
+    }
+
+    async fn recipe_session(sm: &SessionManager) -> String {
+        let session = sm
+            .create_session(
+                PathBuf::from("/tmp/cow-naming"),
+                "ComplianceCow Rules Specialist".to_string(),
+                SessionType::User,
+                GooseMode::default(),
+            )
+            .await
+            .expect("create session");
+
+        let recipe = Recipe::builder()
+            .title("ComplianceCow Rules Specialist")
+            .description("cow-rules")
+            .instructions("Follow the recipe")
+            .build()
+            .expect("build recipe");
+
+        sm.update(&session.id)
+            .recipe(Some(recipe))
+            .apply()
+            .await
+            .expect("attach recipe");
+        sm.add_message(
+            &session.id,
+            &Message::user().with_text("how many rules are there?"),
+        )
+        .await
+        .expect("add user message");
+        session.id
+    }
+
+    #[tokio::test]
+    async fn recipe_session_is_named_from_its_conversation_not_the_recipe() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = recipe_session(&sm).await;
+
+        let update = sm
+            .maybe_update_name(&id, Arc::new(NamingProvider))
+            .await
+            .expect("maybe_update_name must not error on a recipe session");
+
+        assert_eq!(
+            update.as_ref().map(|u| u.name.as_str()),
+            Some(NAMED_BY_MODEL),
+            "a recipe session must be named from its conversation. Getting the \
+             recipe title here means upstream's recipe short-circuit is back in \
+             SessionManager::maybe_update_name"
+        );
+
+        let reloaded = sm.get_session(&id, false).await.unwrap();
+        assert_eq!(reloaded.name, NAMED_BY_MODEL);
+        assert!(
+            !reloaded.user_set_name,
+            "a system-generated name must not be marked user-set"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_supplied_title_still_wins_over_generated_naming() {
+        let temp_dir = TempDir::new().unwrap();
+        let sm = SessionManager::new(temp_dir.path().to_path_buf());
+        let id = recipe_session(&sm).await;
+
+        sm.update(&id)
+            .user_provided_name("Q3 access review".to_string())
+            .apply()
+            .await
+            .unwrap();
+
+        let update = sm
+            .maybe_update_name(&id, Arc::new(NamingProvider))
+            .await
+            .unwrap();
+        assert!(update.is_none(), "a user-set name must never be replaced");
+        assert_eq!(
+            sm.get_session(&id, false).await.unwrap().name,
+            "Q3 access review"
+        );
+    }
+}
