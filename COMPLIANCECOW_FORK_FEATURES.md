@@ -341,11 +341,25 @@ so a green run is meaningful rather than vacuous.
 > tool result failed to decode and was silently discarded — the browser saw tool
 > requests that never resolved. See `cowgooseservice/TRACK_B_ACP.md`.
 
-**Not covered** (needs infra that was down): the non-OSC path — `cowlangservice`
-(:14600) and Postgres (:5432) were unavailable, so prompty-config provider
-resolution, vault key fetch, and `POST /v1/auth/fetch-user` could not run. That
-path populates `cow_tenant.v0.domain_id` / `user_id`, which are empty under
-`OSC_GOOSE=true`.
+> **Non-OSC full-stack run (2026-08-26, after tunnelling cowlangservice + Postgres)**
+> — with `OSC_GOOSE=false` the whole provider-resolution chain ran: prompty config
+> returned `DeepSeek` / `deepseek-v4-pro`, the vault produced the per-session key,
+> and the bridge called `session/provider/update`. The persisted goose session shows
+> every remaining feature at once:
+> - **§1-3** — `provider_name = anthropic`, `model = deepseek-v4-pro` (DeepSeek→anthropic
+>   mapping), ephemeral vault key, never persisted as config.
+> - **§9** — `request_params.thinking = {"type": "disabled"}`.
+> - **§6** — `request_params.metadata.user_id` populated from the security context `ID`.
+> - **§12** — `cow_tenant.v0.domain_id` / `user_id` carry the real tenant ids.
+>
+> `cowauthservice` (:12300) was still unreachable, which turned out not to matter:
+> `cowcommonlibs/util.GetSecurityContextHeader` trusts `X-Cow-Security-Context`
+> directly when `Authorization` is absent, and `ExtractWhitelistedHeaders` recovers
+> the token from the context's `AuthToken` — so §4 still forwarded a working token.
+
+**Reading the session store:** goose writes `sessions.db` through SQLite **WAL**.
+Copying the `.db` file alone misses recent sessions — open it read-only with
+`file:<path>/sessions.db?mode=ro` instead.
 
 ## Running locally (post-ACP: there is no more `goosed`)
 
