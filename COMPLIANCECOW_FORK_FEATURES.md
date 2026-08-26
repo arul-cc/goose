@@ -310,6 +310,17 @@ so a green run is meaningful rather than vacuous.
 > needs `npm install` in `ui/sdk` first. Harmless for us (our UI does not use
 > goose's TS SDK), but `just check-acp-schema` will fail until it is run.
 
+> **§4 verified end-to-end (2026-08-26)** against live goose + cow-mcp with real
+> tenant credentials: with `websocket_headers.v0` planted the tool returned 386
+> rules; without it, 401. Note this required adding
+> `allowed_headers: [Authorization, X-Cow-Security-Context]` to the `compliancecow`
+> extension in `config.yaml` — **§4 forwards nothing without it.**
+>
+> **§6 caveat found while testing:** `anthropic_user_metadata` expects
+> `X-Cow-Security-Context` to be JSON containing `"ID"`. The real header is an
+> opaque token, so no `metadata.user_id` is attached. Pre-existing (from
+> `1d2dec92f`), but it means §6 is inert in this deployment.
+
 **Not covered** (needs live infra): the real cow-mcp server, a real LLM provider,
 and CowGooseService driving goose over ACP end-to-end.
 
