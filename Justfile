@@ -173,6 +173,10 @@ cow-verify:
 cow-validate:
     python3 scripts/validate-compliancecow.py
 
+# Reclaim disk. No args = caches only (safe); --ours or --all go further.
+cow-clean *ARGS:
+    ./scripts/clean-goose.sh {{ARGS}}
+
 # Check if checked-in ACP artifacts are up-to-date and the docs can be rendered
 check-acp-artifacts: generate-acp-types generate-acp-docs
     #!/usr/bin/env bash
