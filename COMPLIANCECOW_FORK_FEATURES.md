@@ -5,8 +5,9 @@ upstream `goose`, plus the companion changes in **CowGooseService** (the Go
 WebSocket↔SSE bridge). Use it as the single source of truth when rebasing onto a
 new upstream, onboarding, or restoring a feature.
 
-- **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — sync branch
-  `sync-upstream-20260705` (rebased onto `block/goose` `main`)
+- **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — branch
+  `acp-migration`, rebased onto `block/goose` `main` **2026-08-27**
+  (upstream `caf59517c`, goose 1.48.0)
 - **CowGooseService (Go):** `/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/`
 - **cow-mcp (Python):** `http://0.0.0.0:45678/mcp`
 
@@ -42,6 +43,48 @@ feature-by-feature reconciliation. New crate layout:
 | `crates/goose/src/agents/*.rs`, `crates/goose-server/src/routes/*.rs` | *same paths* |
 
 ---
+
+## Sync log
+
+### 2026-08-27 — 175 upstream commits (1.46.0 → 1.48.0)
+
+Nine days of upstream, rebased onto `caf59517c`. **31 fork commits replayed, one
+conflict.**
+
+The conflict was `platform_extensions/summon.rs` (§12): upstream reworked
+provider construction to fetch the registry entry first and pass a
+`provider_default_model` into a now-5-arg `resolve_model_config`, while our
+commit adds the tenant-key early return. Both survive — the early return moved
+below the new `model_config` and above upstream's `match provider_entry`.
+
+One follow-up edit was needed: upstream's new
+`test_codex_rejects_socket_backed_streamable_http` builds
+`ExtensionConfig::StreamableHttp` as a struct literal, so §4's `allowed_headers`
+field broke the *test* target while the lib itself compiled — `cargo build` did
+not catch it, `cargo test` did. Any sync adding a construction site will need the
+same one-line edit.
+
+What made this cheap: upstream touched 7 fork-critical files but **not one
+fork-owned function**. Zero commits mention `DynamicHeaderClient`,
+`filter_allowed_headers`, `allowed_headers`, `create_streamable_http_client`,
+`maybe_update_name`, or the recipe-title logic §13 removed. The overlaps were
+same-file, different-region.
+
+Verification after: 26/26 fork markers, 9/9 fork feature tests, Go 7/7 including
+the live ACP round-trip, and full-stack 16 passed / 0 failed (§1-3, §4 both
+sides, §6, §9, §12, §13, recipe selection, 37,829 bytes of authorized tenant
+data).
+
+`cargo test -p goose --lib` sits at the same pre-sync baseline — 4 crypto/JWT
+(environmental), 2 `state_machine`, and `test_all_platform_extensions` which
+needs `--features code-mode`. One extra, `tool_dispatch_records_gen_ai_span_attributes`,
+fails only under parallelism and passes single-threaded and in isolation: an
+upstream test-isolation issue in `agent.rs`, a file the fork does not touch.
+
+**Unexplained, watch for it:** the first live ACP round-trip after the bump
+returned `-32603 Internal error` from `session/fork`. Eleven subsequent runs
+passed, including immediately after a restart, and the server log from that run
+was overwritten before it could be read. Not reproduced, not explained.
 
 ## Part 1 — goose fork (Rust) feature status after the sync
 
