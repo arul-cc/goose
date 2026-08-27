@@ -887,6 +887,7 @@ mod tests {
             client_id: None,
             client_secret_key: None,
             scopes: vec![],
+            allowed_headers: vec![],
             bundled: None,
             available_tools: vec![],
         };
