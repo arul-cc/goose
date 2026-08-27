@@ -173,6 +173,10 @@ cow-verify:
 cow-validate:
     python3 scripts/validate-compliancecow.py
 
+# Reclaim disk. No args = caches only (safe); --ours or --all go further.
+cow-clean *ARGS:
+    ./scripts/clean-goose.sh {{ARGS}}
+
 # Check if generated ACP schema and TypeScript types are up-to-date
 check-acp-schema: generate-acp-types
     #!/usr/bin/env bash
