@@ -101,3 +101,10 @@ sessions/
 # Generated files
 ui/desktop/openapi.json
 ui/desktop/src/api/
+
+# Python virtualenvs and build output — a local .venv in mcp-servers/ would
+# otherwise be copied into the build context and baked into the image.
+**/.venv/
+**/dist/
+**/__pycache__/
+**/.pytest_cache/
