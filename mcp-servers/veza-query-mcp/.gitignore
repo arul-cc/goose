@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# never commit credentials or cached tenant data
+.env
+*.env
+!*.env.example
