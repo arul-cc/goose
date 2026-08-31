@@ -177,6 +177,10 @@ cow-validate:
 cow-clean *ARGS:
     ./scripts/clean-goose.sh {{ARGS}}
 
+# Build the ACP server image. Tag defaults to <branch>-<sha>; --push needs --registry.
+cow-image *ARGS:
+    ./scripts/build-image.sh {{ARGS}}
+
 # Check if checked-in ACP artifacts are up-to-date and the docs can be rendered
 check-acp-artifacts: generate-acp-types generate-acp-docs
     #!/usr/bin/env bash
