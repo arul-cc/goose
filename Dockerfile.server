@@ -20,6 +20,12 @@
 #                ~/.config/goose/recipes. A missing recipe fails SOFT — a warning,
 #                then the session runs with default extensions instead.
 
+# uv is a runtime dependency, not a build one: goose spawns `uvx` directly for
+# inline-Python extensions — `uvx --with mcp [--with dep] python <file>` in
+# extension_manager.rs — and stdio extensions configured as `cmd: uvx`.
+ARG UV_VERSION=0.12.7
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 FROM rust:1.96-bookworm AS builder
 
 # python3 is only needed if code-mode is re-enabled (see FEATURES below): that
@@ -135,9 +141,40 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/goose /usr/local/bin/goose
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# uv provides the interpreter, so there is no system python3 in this image.
+#
+# Installed at build time on purpose. uv would otherwise fetch a managed Python
+# on first use, which turns the first inline-Python extension of a container's
+# life into a ~30MB download — a slow cold start, and a hard failure wherever
+# egress to python-build-standalone is blocked.
+#
+# a+rX because the interpreter lives outside $HOME and is read by uid 1000.
+ARG PYTHON_VERSION=3.12
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN uv python install "${PYTHON_VERSION}" && chmod -R a+rX /opt/uv
+
+# First-party MCP servers. Any direct subdirectory of mcp-servers/ with a
+# pyproject.toml is installed here, and its console script lands in
+# /usr/local/bin — see mcp-servers/README.md.
+#
+# The loop is a no-op when the directory holds only its README, so this costs
+# nothing until a server is actually added.
+COPY mcp-servers /opt/goose/mcp-servers
+ENV UV_TOOL_DIR=/opt/uv/tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin
+RUN set -eu; \
+    for d in /opt/goose/mcp-servers/*/; do \
+      [ -f "${d}pyproject.toml" ] || continue; \
+      echo "installing MCP server: $(basename "$d")"; \
+      uv tool install "$d"; \
+    done; \
+    chmod -R a+rX /opt/uv
 
 RUN useradd -m -u 1000 -s /bin/bash goose && \
-    mkdir -p /home/goose/.config/goose /home/goose/recipes && \
+    mkdir -p /home/goose/.config/goose /home/goose/recipes \
+             /home/goose/.cache/uv /home/goose/.local/share/uv /home/goose/.local/bin && \
     chown -R goose:goose /home/goose
 
 # Provenance. .dockerignore excludes .git/, so these cannot be computed inside
@@ -161,6 +198,13 @@ ENV GOOSE_IMAGE_REF=${GIT_REF} \
 ENV HOME=/home/goose \
     GOOSE_DISABLE_KEYRING=1 \
     GOOSE_RECIPE_PATH=/home/goose/recipes
+
+# Only the cache is per-user and writable. Servers from mcp-servers/ are baked
+# into a shared, read-only tool dir above, with their executables on the default
+# PATH — so `cmd: veza-query-mcp` in config.yaml resolves with no path and no
+# resolution step. `uvx --with <dep>` still reaches PyPI on every start, so a
+# cluster without egress needs its servers baked in rather than fetched.
+ENV UV_CACHE_DIR=/home/goose/.cache/uv
 
 USER goose
 WORKDIR /home/goose
