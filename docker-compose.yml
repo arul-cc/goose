@@ -1,0 +1,80 @@
+# goose ACP server — local build and run.
+#
+#   docker compose build                 # build with the tag below
+#   docker compose up -d                 # run it
+#   docker compose logs -f goose-acp
+#
+# Tagging is driven by environment, so the same file serves local iteration and
+# a registry push. scripts/build-image.sh sets all of these for you; set them by
+# hand only for one-off builds:
+#
+#   GOOSE_IMAGE_REPO   registry + name   (default: goose-acp, i.e. local only)
+#   GOOSE_IMAGE_TAG    tag               (default: dev)
+#
+# Compose reads a root .env file for these, which is how most people should set
+# them. See deploy/goose.env.example.
+
+services:
+  goose-acp:
+    image: ${GOOSE_IMAGE_REPO:-goose-acp}:${GOOSE_IMAGE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      args:
+        # 0 = one job per core. Cap it only if the builder is memory-bound;
+        # see the note in Dockerfile.server.
+        BUILD_JOBS: ${GOOSE_BUILD_JOBS:-0}
+        FEATURES: ${GOOSE_FEATURES:-rustls-tls}
+        GIT_REF: ${GOOSE_GIT_REF:-unknown}
+        GIT_SHA: ${GOOSE_GIT_SHA:-unknown}
+        BUILD_DATE: ${GOOSE_BUILD_DATE:-unknown}
+
+    # `goose serve` refuses to start without this. Compose fails with the message
+    # below rather than starting a server that immediately exits.
+    environment:
+      GOOSE_SERVER__SECRET_KEY: ${GOOSE_SERVER_SECRET_KEY:?set GOOSE_SERVER_SECRET_KEY (CowGooseService sends it as the x-secret-key header)}
+      # §6: Anthropic prompt caching is disabled per-tenant in this fork.
+      ANTHROPIC_DISABLE_CACHE: ${ANTHROPIC_DISABLE_CACHE:-}
+
+    # Provider keys, tenant config and anything else goose needs at run time.
+    # Optional so `docker compose up` works before you have written one.
+    env_file:
+      - path: ${GOOSE_ENV_FILE:-./deploy/goose.env}
+        required: false
+
+    ports:
+      - "${GOOSE_HOST_PORT:-3000}:3000"
+
+    volumes:
+      # Directories, not the config.yaml file itself: a bind whose source file
+      # does not exist makes Docker silently create a DIRECTORY in its place,
+      # and goose then starts with no config at all.
+      #
+      # The compliancecow extension in config.yaml must carry
+      #   allowed_headers: [Authorization, X-Cow-Security-Context]
+      # or §4 header forwarding is off and every MCP call 401s — with no error
+      # from goose, because the tool call itself succeeds.
+      - ${GOOSE_CONFIG_DIR:-./deploy/goose/config}:/home/goose/.config/goose:ro
+
+      # cow-<session_type> recipes. A missing recipe fails SOFT: a warning, then
+      # the session runs with default extensions. Check the log, not the exit code.
+      - ${GOOSE_RECIPES_DIR:-./deploy/goose/recipes}:/home/goose/recipes:ro
+
+      # Sessions are SQLite (sessions.db, WAL) under the XDG data dir. Without a
+      # volume every session vanishes on restart. This is also why goose runs
+      # single-replica: two containers cannot share this store.
+      - goose-sessions:/home/goose/.local/share/goose
+
+    # /health and /status are on the aux router, outside the token auth layer,
+    # so this needs no secret.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+    restart: unless-stopped
+
+volumes:
+  goose-sessions:

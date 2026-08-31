@@ -95,3 +95,10 @@ gooseselftest/
 /crates/goose-sdk/examples/uniffi/kotlin/.gradle/
 /crates/goose-sdk/examples/uniffi/kotlin/.kotlin/
 /crates/goose-sdk/examples/uniffi/kotlin/build/
+
+# Local deployment inputs for docker-compose.yml — provider keys and the
+# server secret live here, and config.yaml carries the tenant extension config.
+/deploy/goose.env
+/deploy/goose/config/config.yaml
+/deploy/goose/recipes/*
+!/deploy/goose/recipes/.gitkeep

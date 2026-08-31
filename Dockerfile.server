@@ -1,0 +1,182 @@
+# syntax=docker/dockerfile:1.7
+# goose ACP server image.
+#
+# Replaces the old goosed image. Upstream deleted crates/goose-server, so there
+# is no goosed binary any more: the server is `goose serve`, which speaks ACP
+# (JSON-RPC 2.0) over HTTP and WebSocket at /acp.
+#
+# Build this through scripts/build-image.sh — it computes the git metadata below
+# and picks an immutable tag. Direct builds work too:
+#
+#   docker build -f Dockerfile.server -t goose-acp:local .
+#   docker compose build
+#
+# Two mounts are not optional for the ComplianceCow setup:
+#
+#   config.yaml  the compliancecow extension must list
+#                allowed_headers: [Authorization, X-Cow-Security-Context].
+#                Without it every MCP call is unauthenticated and 401s.
+#   recipes/     goose resolves cow-<session_type> from GOOSE_RECIPE_PATH or
+#                ~/.config/goose/recipes. A missing recipe fails SOFT — a warning,
+#                then the session runs with default extensions instead.
+
+FROM rust:1.96-bookworm AS builder
+
+# python3 is only needed if code-mode is re-enabled (see FEATURES below): that
+# feature pulls v8-goose, whose build script downloads a prebuilt librusty_v8
+# using Python. Kept here so raising FEATURES does not also require editing apt.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    libdbus-1-dev \
+    libclang-dev \
+    protobuf-compiler \
+    libprotobuf-dev \
+    python3 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV CARGO_PROFILE_RELEASE_STRIP=true
+
+# 0 means "let cargo decide", which is one job per core — the right default on a
+# native Linux builder, where the daemon uses host RAM directly.
+#
+# Cap it only when memory is the binding constraint, not cores: this workspace
+# needs roughly 2GB per concurrent rustc, and `goose` (lib) alone was SIGKILLed
+# under 4GB after 364 crates had already built. Docker Desktop is the usual
+# offender because it hands the builder every host core inside a small VM.
+#
+#   BUILD_JOBS = min(nproc, RAM_GB / 2)
+#
+# Override with --build-arg BUILD_JOBS=N.
+ARG BUILD_JOBS=0
+
+# goose-cli's default features include local-inference (llama-cpp, candle,
+# tokenizers, symphonia) and code-mode (v8) — everything needed to run a model
+# on the same machine. This server calls a remote LLM, so none of it is used,
+# and compiling it made `goose` (lib) alone exceed a 4GB builder's memory. The
+# trim also cuts the dependency graph from 952 crates to 540.
+#
+# The fork's own features are not behind any of these gates — §4 header
+# forwarding, the custom ACP methods, §6/§9 provider behaviour and §12 subagent
+# tenancy are all in the core lib — so trimming here does not touch them. The
+# assertion below is what proves that, per build, rather than assuming it.
+#
+# Re-add features here if you need them, e.g.
+#   --build-arg FEATURES=rustls-tls,code-mode
+ARG FEATURES=rustls-tls
+
+# Cache mounts keep the registry and target dir across builds. The binary lives
+# inside the cached target dir, which is not part of the image layer, so it must
+# be copied out inside the same RUN.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    set -eu && \
+    if [ "${BUILD_JOBS}" != "0" ]; then export CARGO_BUILD_JOBS="${BUILD_JOBS}"; fi && \
+    cargo build --release --package goose-cli --bin goose \
+      --no-default-features --features "${FEATURES}" && \
+    cp /build/target/release/goose /usr/local/bin/goose
+
+# Fail the build if the fork's custom ACP methods are missing from the binary.
+#
+# This exists because an image built from `main` instead of `acp-migration` is
+# indistinguishable from a correct one until runtime, where it presents as
+# `-32601: Method not found` on session/provider/update — an error CowGooseService
+# SWALLOWS. The session then runs with the wrong provider, and §4 tenant headers
+# never reach cow-mcp, so MCP calls 401 with nothing obviously wrong upstream.
+# Two hours of k8s debugging; catching it here costs a second.
+#
+# grep -a rather than `strings` so this does not depend on binutils. Release
+# stripping removes symbols, not .rodata string literals, so the method names
+# survive; if that ever stops being true this fails loudly instead of silently.
+RUN set -eu; \
+    missing=""; \
+    for m in \
+      "_goose/unstable/session/provider/update" \
+      "_goose/unstable/session/extension_data/set" \
+      "_goose/unstable/session/info" \
+      "_goose/unstable/session/rename" \
+      "_goose/unstable/session/export" ; do \
+      grep -aqF "$m" /usr/local/bin/goose || missing="${missing} ${m}"; \
+    done; \
+    if [ -n "$missing" ]; then \
+      echo "=============================================================="; \
+      echo "FORK METHODS MISSING from the built binary:"; \
+      for m in $missing; do echo "    $m"; done; \
+      echo; \
+      echo "This binary was almost certainly built from a branch without the"; \
+      echo "ComplianceCow fork changes. Check out acp-migration and rebuild."; \
+      echo "=============================================================="; \
+      exit 1; \
+    fi; \
+    echo "fork ACP methods present"
+
+# Runtime stage — minimal Debian
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    libdbus-1-3 \
+    libgomp1 \
+    libxcb1 \
+    curl \
+    git \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/bin/goose /usr/local/bin/goose
+
+RUN useradd -m -u 1000 -s /bin/bash goose && \
+    mkdir -p /home/goose/.config/goose /home/goose/recipes && \
+    chown -R goose:goose /home/goose
+
+# Provenance. .dockerignore excludes .git/, so these cannot be computed inside
+# the build — build-image.sh passes them in. Recorded as ENV as well as LABEL so
+# `kubectl exec <pod> -- env | grep GOOSE_IMAGE` answers "which branch is this?"
+# without needing registry access to inspect labels.
+ARG GIT_REF=unknown
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+
+ENV GOOSE_IMAGE_REF=${GIT_REF} \
+    GOOSE_IMAGE_REVISION=${GIT_SHA}
+
+# GOOSE__HOST and GOOSE__PORT are deliberately absent: they belonged to goosed
+# and nothing reads them now, so setting them would describe a configuration the
+# server does not have. Host and port are flags on the CMD below.
+#
+# `goose serve` refuses to start unless GOOSE_SERVER__SECRET_KEY is set or
+# --dangerously-unauthenticated is passed. Supply the key at run time;
+# CowGooseService already sends it as the x-secret-key header.
+ENV HOME=/home/goose \
+    GOOSE_DISABLE_KEYRING=1 \
+    GOOSE_RECIPE_PATH=/home/goose/recipes
+
+USER goose
+WORKDIR /home/goose
+EXPOSE 3000
+
+ENTRYPOINT ["/usr/local/bin/goose"]
+# goose's own default is 127.0.0.1:3284, which is unreachable from outside the
+# container. The port must match what CowGooseService dials — a mismatch there
+# presents as a hang, not an error.
+CMD ["serve", "--host", "0.0.0.0", "--port", "3000"]
+
+# Static, not derived from `git remote get-url`: the local remotes carry an
+# embedded access token, which would be published with the image.
+LABEL org.opencontainers.image.title="goose-acp" \
+      org.opencontainers.image.description="goose ACP server (goose serve)" \
+      org.opencontainers.image.source="https://github.com/opensecuritycompliance/goose" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${GIT_REF}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
