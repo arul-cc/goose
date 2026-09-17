@@ -41,11 +41,11 @@ MARKERS = [
     ("§4", "SetSessionExtensionDataRequest", "crates/goose-sdk-types/src/custom_requests.rs", "present"),
     ("§4", "_goose/unstable/session/extension_data/set", "crates/goose-sdk-types/src/custom_requests.rs", "present"),
     ("§4", "dispatch_set_session_extension_data", "crates/goose/src/acp/server/custom_dispatch.rs", "present"),
-    ("§4", "filter_allowed_headers", "crates/goose/src/agents/extension_manager.rs", "present"),
-    ("§4", "DynamicHeaderClient", "crates/goose/src/agents/extension_manager.rs", "present"),
+    ("§4", "filter_allowed_headers", "crates/goose/src/agents/extension_manager/streamable_http.rs", "present"),
+    ("§4", "DynamicHeaderClient", "crates/goose/src/agents/extension_manager/streamable_http.rs", "present"),
     ("§4", "allowed_headers", "crates/goose/src/agents/extension.rs", "present"),
     ("§4", "allowed_headers", "crates/goose-sdk-types/src/custom_requests.rs", "present"),
-    ("§4", "websocket_headers.v0", "crates/goose/src/agents/extension_manager.rs", "present"),
+    ("§4", "websocket_headers.v0", "crates/goose/src/agents/extension_manager/streamable_http.rs", "present"),
 
     # §6 Anthropic request metadata + DeepSeek cache_control incompatibility
     ("§6", "anthropic_user_metadata", "crates/goose/src/acp/server.rs", "present"),

@@ -4304,6 +4304,7 @@ mod tests {
             scopes: vec![],
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: vec![],
         };
         let ordinary_http = ExtensionConfig::StreamableHttp {
             name: "ordinary-http".into(),
@@ -4319,6 +4320,7 @@ mod tests {
             scopes: vec![],
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: vec![],
         };
 
         let result = extension_configs_to_mcp_servers(&[socket_backed, ordinary_http]);

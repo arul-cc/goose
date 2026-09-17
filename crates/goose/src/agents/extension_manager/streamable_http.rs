@@ -281,7 +281,6 @@ async fn connect_with_auth(
     .await?)
 }
 
-
 /// Filter a session's `websocket_headers` map down to the allow-listed names
 /// (case-insensitive) and convert them to HTTP header pairs. Non-string values
 /// and names/values that aren't valid HTTP headers are skipped. An empty
@@ -736,10 +735,8 @@ pub(super) async fn connect(
     // every request. With no `allowed_headers` configured this is a transparent
     // passthrough. Only the unauthenticated path is wrapped — the OAuth paths
     // carry their own credentials and take static headers from `header_map`.
-    let http_client = DynamicHeaderClient::new(
-        http_client(headers, ctx.timeout)?,
-        allowed_headers.clone(),
-    );
+    let http_client =
+        DynamicHeaderClient::new(http_client(headers, ctx.timeout)?, allowed_headers.clone());
     if let Some(sid) = session_id {
         http_client.set_session_id(sid.clone()).await;
     }
@@ -881,6 +878,8 @@ mod tests {
             name: "test-ext".to_string(),
             headers,
             static_oauth_client: None,
+            allowed_headers: Vec::new(),
+            session_id: None,
             ctx: test_ctx(working_dir),
         }
     }
@@ -1308,5 +1307,65 @@ mod tests {
 
             assert!(error.to_string().contains("MISSING_KEY"));
         }
+    }
+}
+
+#[cfg(test)]
+mod dynamic_header_tests {
+    use super::filter_allowed_headers;
+    use axum::http::{HeaderName, HeaderValue};
+    use serde_json::json;
+
+    fn obj(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn forwards_only_allow_listed_headers_case_insensitively() {
+        let headers = obj(json!({
+            "X-Api-Key": "secret",
+            "X-Tenant-Id": "acme",
+            "X-Not-Allowed": "nope",
+        }));
+        let allowed = vec!["x-api-key".to_string(), "X-TENANT-ID".to_string()];
+        let result = filter_allowed_headers(&headers, &allowed);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get(&HeaderName::from_static("x-api-key")),
+            Some(&HeaderValue::from_static("secret"))
+        );
+        assert_eq!(
+            result.get(&HeaderName::from_static("x-tenant-id")),
+            Some(&HeaderValue::from_static("acme"))
+        );
+        assert!(!result.contains_key(&HeaderName::from_static("x-not-allowed")));
+    }
+
+    #[test]
+    fn empty_allow_list_forwards_nothing() {
+        let headers = obj(json!({ "X-Api-Key": "secret" }));
+        assert!(filter_allowed_headers(&headers, &[]).is_empty());
+    }
+
+    #[test]
+    fn skips_non_string_and_invalid_values() {
+        let headers = obj(json!({
+            "X-Api-Key": 12345,
+            "X-Tenant-Id": "ok",
+            "X-Bad-Value": "line\nbreak",
+        }));
+        let allowed = vec![
+            "x-api-key".to_string(),
+            "x-tenant-id".to_string(),
+            "x-bad-value".to_string(),
+        ];
+        let result = filter_allowed_headers(&headers, &allowed);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&HeaderName::from_static("x-tenant-id")),
+            Some(&HeaderValue::from_static("ok"))
+        );
     }
 }
