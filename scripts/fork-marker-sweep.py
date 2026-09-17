@@ -35,6 +35,10 @@ MARKERS = [
     ("§1-3", "_goose/unstable/session/provider/update", "crates/goose-sdk-types/src/custom_requests.rs", "present"),
     ("§1-3", "dispatch_update_session_provider", "crates/goose/src/acp/server/custom_dispatch.rs", "present"),
     ("§1-3", "on_update_session_provider", "crates/goose/src/acp/server.rs", "present"),
+    # create_with_api_key is an allow-list: a provider missing from that match
+    # fails at session switch time, not at build time. One marker per provider
+    # the platform actually sells.
+    ("§1-3", "from_api_key", "crates/goose/src/providers/google_def.rs", "present"),
 
     # §4 header forwarding — injection side (store) and forwarding side (filter+send).
     # Losing either half leaves the other compiling, which is why both are listed.
@@ -76,6 +80,7 @@ MARKERS = [
     # a rebase can delete it silently — and a deleted test takes its own failure
     # signal with it. This marker is what notices.
     ("gate", "subagent_session_inherits_only_parent_tenant_state", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
+    ("gate", "update_session_provider_accepts_a_google_tenant_key", "crates/goose/tests/compliancecow_features_test.rs", "present"),
 ]
 
 # Behaviour we deliberately removed. A plain file-wide grep would false-positive

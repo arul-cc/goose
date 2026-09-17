@@ -208,6 +208,72 @@ fn update_session_provider_applies_tenant_key_request_params_and_user_id() {
     });
 }
 
+/// §1-3 for Gemini. `create_with_api_key` accepts an allow-list of providers, so
+/// adding Google to the catalog is not enough — a provider missing from that
+/// match fails the session at switch time with "only supports ...", which is
+/// what this asserts against.
+#[test]
+fn update_session_provider_accepts_a_google_tenant_key() {
+    let root_path = TEST_ROOT.path().to_string_lossy().to_string();
+    let _env = env_lock::lock_env([
+        ("GOOSE_PATH_ROOT", Some(root_path.as_str())),
+        ("GOOSE_DISABLE_KEYRING", Some("1")),
+    ]);
+
+    run_test(async move {
+        let openai = common_tests::fixtures::OpenAiFixture::new(
+            vec![],
+            Arc::new(EnforceSessionId::default()),
+        )
+        .await;
+        let mut conn = AcpServerConnection::new(
+            TestConnectionConfig {
+                data_root: Paths::data_dir(),
+                ..Default::default()
+            },
+            openai,
+        )
+        .await;
+
+        let session = conn.new_session().await.expect("new session");
+        let sid = {
+            use common_tests::fixtures::Session as _;
+            session.session.session_id().0.to_string()
+        };
+
+        send_custom(
+            conn.cx(),
+            UPDATE_SESSION_PROVIDER,
+            serde_json::json!({
+                "sessionId": sid,
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "apiKey": "tenant-google-key",
+            }),
+        )
+        .await
+        .expect("session/provider/update must accept a google tenant key");
+
+        let stored = goose::session::SessionManager::instance()
+            .get_session(&sid, false)
+            .await
+            .expect("session should load");
+
+        assert_eq!(
+            stored.provider_name.as_deref(),
+            Some("google"),
+            "§1-3: the session must switch to the tenant's Gemini provider"
+        );
+        assert_eq!(
+            stored
+                .model_config
+                .expect("model_config must be persisted")
+                .model_name,
+            "gemini-2.5-pro",
+        );
+    });
+}
+
 /// Records the headers of every HTTP request reaching the mock MCP server.
 #[derive(Clone, Default)]
 struct HeaderLog(Arc<Mutex<Vec<HashMap<String, String>>>>);
