@@ -71,6 +71,11 @@ MARKERS = [
     # The fork's own gate must survive the rebase that would revert it
     ("gate", "recipe_session_is_named_from_its_conversation", "crates/goose/tests/compliancecow_features_test.rs", "present"),
     ("gate", "allow_listed_session_headers_are_forwarded", "crates/goose/tests/compliancecow_features_test.rs", "present"),
+    # §12's test has to live in summon.rs because it drives a private
+    # create_subagent_session. That is an upstream file, so unlike the two above
+    # a rebase can delete it silently — and a deleted test takes its own failure
+    # signal with it. This marker is what notices.
+    ("gate", "subagent_session_inherits_only_parent_tenant_state", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
 ]
 
 # Behaviour we deliberately removed. A plain file-wide grep would false-positive
