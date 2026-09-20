@@ -247,6 +247,80 @@ pre-ACP base `0764f508c`, forward-ported onto post-ACP upstream).
   `test_maybe_update_name_uses_recipe_title_for_recipe_session`. Raise it if
   ComplianceCow wants LLM-generated names for recipe sessions.
 
+### §14 Session credentials held out of the database — added 2026-09-20
+
+`websocket_headers.v0` carries three tenant credentials: the LLM provider key
+(`x-api-key`), the platform auth token (`authorization`), and
+`x-cow-security-context`, which embeds another token. Those were serialized into
+`sessions.extension_data` — a plain `TEXT` column — so a stolen `sessions.db`, a
+PVC snapshot or a backup yielded live credentials. They also travelled with
+session export, session copy, and the ACP session-info response.
+
+- **Process-local store.** `session/session_secrets.rs` keys credentials by
+  session id and never serializes them. `split_secret_headers` pulls them out in
+  `on_set_session_extension_data` before the rest is persisted.
+- **Reads merge.** `merged_headers(session_id, extension_data)` layers the
+  in-memory credentials over the persisted headers. The three consumers —
+  `DynamicHeaderClient` (§4), `session_provider_credentials` (§12) and
+  `anthropic_user_metadata` (§6) — go through it, so their behaviour is unchanged.
+- **Subagents.** `session_secrets::copy` runs in `create_subagent_session`:
+  `INHERITED_SUBAGENT_EXTENSION_STATES` copies header *names*, so without this the
+  subagent inherits an empty key and silently falls back to global credentials.
+- **Export redacts.** `session_secrets::redact` strips credentials from rows
+  written before this change, which export otherwise hands out verbatim.
+- **Cleanup.** `delete_session` drops the session's entry.
+
+**The key already came from the vault** — `resolveProvider` on the Go side has
+always fetched it. The defect was that goose then wrote it to disk. The host
+re-pushes headers on every (re)connect (`connection_manager.go` — on resume, and
+on re-create after a goose restart), so the store repopulates from the vault
+rather than from disk.
+
+**Migration.** Rows written before this keep their credentials; `merged_headers`
+falls back to the persisted map so those sessions still work. Scrubbing them is
+not done — the fallback must stay until it is.
+
+⚠️ **The store is keyed by session id, which `create_session` allocates as
+`YYYYMMDD_N` counting up within one database.** That is unique for a server, which
+opens one database, but *not* across two `SessionManager`s. Anything that builds a
+second one — tests, tooling — must `session_secrets::remove` what it stores, or it
+hands those credentials to the next session that lands on the same id.
+
+⚠️ **Provider restore still ignores the session key.** It reads `GOOGLE_API_KEY`
+etc. from global config and never consulted the tenant key — before this change or
+after. Pre-existing, but it matters more now that nothing repopulates from disk.
+Open decision: fail loudly, or use the session's key.
+
+### §15 Re-applying a recipe to an existing session — added 2026-09-20
+
+goose applies a recipe only at `session/new`, via `_meta.recipeId`. A chat created
+before the platform wired recipes in carries none of the recipe's extensions, so
+resuming one leaves the model with no ComplianceCow tools. goose logs
+*"No extensions found in session … This is unexpected."* and the chat reads as
+broken for reasons the user cannot see.
+
+- **`_goose/unstable/session/recipe/apply`** (`ApplySessionRecipeRequest`,
+  `on_apply_session_recipe`) applies a recipe to an existing session, reusing
+  `build_enabled_extensions_data`.
+- **`load_recipe_by_id`** shares `resolve_recipe_path_by_id` with `session/new`, so
+  a recipe id resolves to the same file whether applied at creation or later.
+- **CowGooseService** calls it on every resume
+  (`bridge/acp_wiring.go` — `applyRecipeToResumedSession`).
+
+**Why not translate extensions on the Go side.** An extension has three shapes: the
+recipe DTO (`type: streamable_http`, `uri`), goose's internal `ExtensionConfig`
+(`StreamableHttp`), and the ACP wire type `GooseExtension` (`Mcp { server: McpServer }`).
+`session/extensions/add` takes the third and rejects the first. `McpServer` is an
+**untagged** enum owned by the external `agent-client-protocol` crate, so building
+it outside goose means tracking an upstream SDK's wire format. Keeping the
+conversion in goose is the point of this method.
+
+**It replaces, it does not merge.** The session ends up with the extension set
+`session/new` would have built — configured builtins plus the recipe's. An
+extension added by any other route is dropped. That is correct only where the
+recipe owns the session's extensions, which is the platform's case. Applying twice
+changes nothing, which is what makes it safe on every resume.
+
 ### Operational tweaks (not in §1-11, found via identifier audit)
 
 - **Configurable SQLite pool size.** `crates/goose/src/session/session_manager.rs` —
@@ -291,7 +365,8 @@ Browser WS ⇄ goose HTTP+SSE; multiplexes many goose sessions over one WS.
 
 ### 2. Header forwarding
 Captures whitelisted WS-handshake headers and stores them in the goose session as
-`websocket_headers.v0` (consumed by goose §4 above).
+`websocket_headers.v0` (consumed by goose §4 above). The credentials among them are
+no longer persisted goose-side (§14); they are re-pushed on every (re)connect.
 - `bridge/sse_ws_bridge.go` — `HeaderWhitelist`, `ExtractWhitelistedHeaders`.
 
 ### 3. Per-session provider resolution
@@ -299,7 +374,27 @@ Resolves provider/model/API-key per session; handshake headers first, then
 vault/prompty fallback. Sends them in the `update_provider` request body.
 - `main.go` — `resolveProvider`; `utils/llm_tools_vault.go`.
 
-### 4. DeepSeek thinking control (request_params injection)
+### 4. Session attribution (allow-listed, §14)
+`cow_tenant.v0` records `email`, `username`, `org_id`, `group_id` and `role_name`
+alongside the ids it already held, so a session still says who ran it now that the
+security context is not persisted.
+- `bridge/sse_ws_bridge.go` — `attributionFields`, `ExtractAttribution`,
+  `BuildTenantState` (shared by the bridge and `headless/runner.go`).
+
+These five are an **allow-list, deliberately not a deny-list.** The header is a
+serialized `SecurityContext`, which embeds the whole `UserVO`: it carries
+`AuthToken` and a populated `hash` today, and `Token`, `AzureToken` and `OTP` are
+declared on the same struct. Naming what to drop means every field added upstream
+lands in the session database unnoticed — which is how the credentials got there.
+
+⚠️ `email` and `username` are PII, and `extension_data` travels with session export
+and copy.
+
+### 5. Recipe re-apply on resume (§15)
+`bridge/acp_wiring.go` — `applyRecipeToResumedSession`. Fails soft: a missing or
+unreadable recipe costs the tools, never the resume.
+
+### 6. DeepSeek thinking control (request_params injection)
 `utils/deepseek_thinking.go` — `BuildDeepSeekThinkingParams(model)` sets
 `{"thinking": {"type": "disabled"}}` (env `DEEPSEEK_THINKING_MODE`, default
 `disabled`). Threaded through `UpdateProviderRequest.RequestParams`.
@@ -319,13 +414,15 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 | goose env | `ANTHROPIC_CACHE_TTL` | Optional TTL applied to Anthropic `cache_control` blocks |
 | goose env | `GOOSE_DB_MAX_CONNECTIONS` | Session-store SQLite pool size (default 50; raise for high session concurrency) |
 | goose extension YAML | `allowed_headers` | Session headers forwarded to the MCP server (§4) |
+| goose env | `GOOSE_RECIPE_PATH` | Recipe search path; `session/recipe/apply` (§15) resolves ids against it |
 | CowGooseService env | `DEEPSEEK_THINKING_MODE` | `disabled` (default) / `enabled` / `passthrough` |
 | CowGooseService env | `DEEPSEEK_REASONING_EFFORT` | optional effort when enabled |
 
 ## Verifying the fork features
 
 ```bash
-cargo test -p goose --test compliancecow_features_test   # 6 tests
+cargo test -p goose --test compliancecow_features_test   # 11 tests
+cargo test -p goose --lib session_secrets                 # 6 §14 tests
 cargo test -p goose --lib summon                         # incl. 4 §12 tests
 ```
 Both run **offline** — no API keys, no ports, no network — and use
