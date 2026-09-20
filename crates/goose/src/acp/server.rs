@@ -2677,25 +2677,22 @@ impl GooseAcpAgent {
             .get_session(session_id, false)
             .await
             .ok()?;
-        let websocket_headers = session
-            .extension_data
-            .get_extension_state("websocket_headers", "v0")?;
+        let websocket_headers =
+            crate::session::session_secrets::merged_headers(session_id, &session.extension_data)?;
 
-        let user_id = websocket_headers.as_object().and_then(|headers| {
-            headers.iter().find_map(|(key, value)| {
-                if key.eq_ignore_ascii_case("x-cow-security-context") {
-                    value.as_str().and_then(|s| {
-                        serde_json::from_str::<serde_json::Value>(s)
-                            .ok()
-                            .and_then(|json| {
-                                json.get("ID")
-                                    .and_then(|id| id.as_str().map(str::to_string))
-                            })
-                    })
-                } else {
-                    None
-                }
-            })
+        let user_id = websocket_headers.iter().find_map(|(key, value)| {
+            if key.eq_ignore_ascii_case("x-cow-security-context") {
+                value.as_str().and_then(|s| {
+                    serde_json::from_str::<serde_json::Value>(s)
+                        .ok()
+                        .and_then(|json| {
+                            json.get("ID")
+                                .and_then(|id| id.as_str().map(str::to_string))
+                        })
+                })
+            } else {
+                None
+            }
         })?;
 
         Some(serde_json::json!({ "user_id": user_id }))

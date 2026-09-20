@@ -8,6 +8,7 @@ mod last_message_snippet;
 mod legacy;
 pub mod session_manager;
 mod session_naming;
+pub mod session_secrets;
 
 pub use diagnostics::{
     config_path, generate_diagnostics, get_system_info, latest_llm_log_path, read_capped,

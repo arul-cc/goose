@@ -11,6 +11,7 @@ use crate::session::extension_data::ExtensionData;
 use crate::session::session_naming::{
     generate_session_name, MSG_COUNT_FOR_SESSION_NAME_GENERATION,
 };
+use crate::session::session_secrets;
 use anyhow::Result;
 use chrono::{DateTime, TimeZone, Utc};
 use goose_providers::conversation::token_usage::Usage;
@@ -504,7 +505,9 @@ impl SessionManager {
     }
 
     pub async fn delete_session(&self, id: &str) -> Result<()> {
-        self.storage.delete_session(id).await
+        self.storage.delete_session(id).await?;
+        session_secrets::remove(id);
+        Ok(())
     }
 
     pub async fn get_insights(&self) -> Result<SessionInsights> {
@@ -2528,7 +2531,8 @@ impl SessionStorage {
     }
 
     async fn export_session(&self, id: &str) -> Result<String> {
-        let session = self.get_session(id, true).await?;
+        let mut session = self.get_session(id, true).await?;
+        super::session_secrets::redact(&mut session.extension_data);
         serde_json::to_string_pretty(&session).map_err(Into::into)
     }
 

@@ -80,20 +80,19 @@ fn subagent_resume_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Read the session's forwarded per-tenant provider credentials out of
-/// `websocket_headers.v0` — `x-api-key` plus an optional host override. Returns
+/// Read the session's forwarded per-tenant provider credentials — `x-api-key`
+/// plus an optional host override. The key comes from the process-local secret
+/// store rather than from `extension_data`, which no longer persists it. Returns
 /// None when the session carries no tenant key (the normal single-tenant case).
 fn session_provider_credentials(
     session: &crate::session::Session,
 ) -> Option<(String, Option<String>)> {
-    let headers = session
-        .extension_data
-        .get_extension_state("websocket_headers", "v0")?;
-    let headers = headers.as_object()?;
+    let headers =
+        crate::session::session_secrets::merged_headers(&session.id, &session.extension_data)?;
 
     let mut api_key = None;
     let mut host = None;
-    for (key, value) in headers {
+    for (key, value) in &headers {
         let Some(value) = value.as_str() else {
             continue;
         };
@@ -697,6 +696,11 @@ impl SummonClient {
                     update = update.extension_data(inherited);
                 }
             }
+
+            // The credentials in those header sets are held out of the database,
+            // so inheriting extension_data alone leaves the subagent with header
+            // names and no values.
+            crate::session::session_secrets::copy(&task_config.parent_session_id, &session.id);
 
             update
                 .apply()
@@ -4670,7 +4674,16 @@ You review code."#;
         parent_state.set_extension_state(
             "websocket_headers",
             "v0",
-            serde_json::json!({ "x-api-key": "tenant-key" }),
+            serde_json::json!({ "x-domain-name": "acme" }),
+        );
+        // The tenant key never reaches extension_data; it lives in the
+        // process-local store the way the ACP entry point puts it there.
+        crate::session::session_secrets::store(
+            &parent.id,
+            serde_json::json!({ "x-api-key": "tenant-key" })
+                .as_object()
+                .unwrap()
+                .clone(),
         );
         parent_state.set_extension_state("cow_tenant", "v0", serde_json::json!({ "id": "acme" }));
         parent_state.set_extension_state("todo", "v0", serde_json::json!({ "items": [] }));
@@ -4707,9 +4720,24 @@ You review code."#;
             child
                 .extension_data
                 .get_extension_state("websocket_headers", "v0")
-                .and_then(|v| v.get("x-api-key").cloned()),
-            Some(serde_json::json!("tenant-key")),
+                .and_then(|v| v.get("x-domain-name").cloned()),
+            Some(serde_json::json!("acme")),
             "§4 depends on the subagent inheriting the forwarded headers"
+        );
+        // Inheriting extension_data alone would give the child header names with
+        // no key, and it would silently fall back to the global credentials.
+        let inherited = session_provider_credentials(&child);
+
+        // The secret store is process-global and session ids are only unique
+        // within one database, so leaving these behind hands a tenant key to the
+        // next test that happens to allocate the same id.
+        crate::session::session_secrets::remove(&parent.id);
+        crate::session::session_secrets::remove(&child.id);
+
+        assert_eq!(
+            inherited,
+            Some(("tenant-key".to_string(), None)),
+            "the subagent must inherit the parent's tenant key, not run unauthenticated"
         );
         assert!(
             states.contains_key("cow_tenant.v0"),

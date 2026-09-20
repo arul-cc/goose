@@ -355,11 +355,7 @@ impl DynamicHeaderClient {
             Err(_) => return HashMap::new(),
         };
 
-        match session
-            .extension_data
-            .get_extension_state("websocket_headers", "v0")
-            .and_then(|value| value.as_object().cloned())
-        {
+        match crate::session::session_secrets::merged_headers(&sid, &session.extension_data) {
             Some(headers_obj) => filter_allowed_headers(&headers_obj, &self.allowed_headers),
             None => HashMap::new(),
         }

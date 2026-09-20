@@ -51,7 +51,13 @@ impl GooseAcpAgent {
             .internal_err()?;
 
         let mut merged = session.extension_data;
-        for (key, value) in req.extension_data {
+        for (key, mut value) in req.extension_data {
+            if key == crate::session::session_secrets::WEBSOCKET_HEADERS_KEY {
+                if let Some(headers) = value.as_object_mut() {
+                    let secrets = crate::session::session_secrets::split_secret_headers(headers);
+                    crate::session::session_secrets::store(&req.session_id, secrets);
+                }
+            }
             merged.extension_states.insert(key, value);
         }
 
