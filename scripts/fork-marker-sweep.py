@@ -76,6 +76,17 @@ MARKERS = [
     ("§14", "session_secrets::copy", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
     ("§14", "session_secrets::redact", "crates/goose/src/session/session_manager.rs", "present"),
 
+    # §15 re-applying a recipe to an existing session. goose applies recipes only
+    # at session/new, so without this a chat created before the platform wired
+    # recipes in resumes with no tools — a silent failure the user reads as "the
+    # assistant is broken".
+    ("§15", "ApplySessionRecipeRequest", "crates/goose-sdk-types/src/custom_requests.rs", "present"),
+    ("§15", "_goose/unstable/session/recipe/apply", "crates/goose-sdk-types/src/custom_requests.rs", "present"),
+    ("§15", "on_apply_session_recipe", "crates/goose/src/acp/server/extensions.rs", "present"),
+    ("§15", "dispatch_apply_session_recipe", "crates/goose/src/acp/server/custom_dispatch.rs", "present"),
+    ("§15", "load_recipe_by_id", "crates/goose/src/acp/server/recipe/mod.rs", "present"),
+    ("gate", "applying_a_recipe_gives_an_existing_session_its_extensions", "crates/goose/tests/compliancecow_features_test.rs", "present"),
+
     # Branding
     ("brand", "moocp", "crates/goose/src/prompts/system.md", "present"),
     ("brand", "moocp", "crates/goose/src/prompts/subagent_system.md", "present"),

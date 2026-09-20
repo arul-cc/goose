@@ -38,6 +38,25 @@ pub struct AddSessionExtensionRequest {
     pub extension: GooseExtension,
 }
 
+/// ComplianceCow: attach a recipe's extensions to an existing session.
+///
+/// goose applies a recipe only at `session/new`. Sessions created before the
+/// platform wired recipes in therefore carry none of the recipe's extensions,
+/// and resuming one leaves the model without its tools for reasons invisible to
+/// the user.
+///
+/// This leaves the session with exactly the extension set `session/new` would
+/// have given it: the configured builtins plus the recipe's own. That is a
+/// replacement, not a merge — an extension added to the session by any other
+/// route is dropped. Applying twice changes nothing.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
+#[request(method = "_goose/unstable/session/recipe/apply", response = EmptyResponse)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySessionRecipeRequest {
+    pub session_id: String,
+    pub recipe_id: String,
+}
+
 /// Remove an extension from an active session.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, JsonRpcRequest)]
 #[request(method = "_goose/unstable/session/extensions/remove", response = EmptyResponse)]
