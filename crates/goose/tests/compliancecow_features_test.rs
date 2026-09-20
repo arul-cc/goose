@@ -34,6 +34,10 @@ fn security_context(user_id: &str) -> String {
 /// §4 injection side: `websocket_headers.v0` must land in the session's
 /// extension_data, and a second call must MERGE rather than clobber — that is
 /// the token-rotation path CowGooseService relies on.
+///
+/// §14: the credentials in that header set must NOT reach the database. They are
+/// held process-local and merged back on read, so a stolen `sessions.db`, a
+/// session export or a session copy yields header names without values.
 #[test]
 #[serial]
 fn set_session_extension_data_persists_and_merges_websocket_headers() {
@@ -72,7 +76,9 @@ fn set_session_extension_data_persists_and_merges_websocket_headers() {
                 "extensionData": {
                     "websocket_headers.v0": {
                         "x-api-key": "tenant-key-1",
+                        "authorization": "tenant-token-1",
                         "x-cow-security-context": security_context("user-1"),
+                        "x-domain-name": "acme",
                     }
                 }
             }),
@@ -102,8 +108,9 @@ fn set_session_extension_data_persists_and_merges_websocket_headers() {
             .get_extension_state("websocket_headers", "v0")
             .expect("websocket_headers.v0 must survive the second set (merge, not clobber)");
         assert_eq!(
-            headers.get("x-api-key").and_then(|v| v.as_str()),
-            Some("tenant-key-1")
+            headers.get("x-domain-name").and_then(|v| v.as_str()),
+            Some("acme"),
+            "non-secret headers are still persisted"
         );
         assert!(
             stored
@@ -112,6 +119,49 @@ fn set_session_extension_data_persists_and_merges_websocket_headers() {
                 .contains_key("cow_tenant.v0"),
             "second key should also be present"
         );
+
+        // The three credentials must be absent from everything that touches disk
+        // or crosses a wire. Serializing the whole bag is what the sessions row,
+        // session export and session info all do, so it is the honest check.
+        let persisted =
+            serde_json::to_string(&stored.extension_data).expect("extension_data should serialize");
+        for secret in ["tenant-key-1", "tenant-token-1", "user-1"] {
+            assert!(
+                !persisted.contains(secret),
+                "credential {secret} was written to the database: {persisted}"
+            );
+        }
+
+        // ...but they must still resolve in-process, or header forwarding and
+        // per-session providers would silently lose the tenant's identity.
+        let merged = goose::session::session_secrets::merged_headers(&sid, &stored.extension_data)
+            .expect("the session must still resolve its headers");
+        assert_eq!(
+            merged.get("x-api-key").and_then(|v| v.as_str()),
+            Some("tenant-key-1"),
+            "the provider key must survive out of band"
+        );
+        assert_eq!(
+            merged.get("authorization").and_then(|v| v.as_str()),
+            Some("tenant-token-1")
+        );
+        assert_eq!(
+            merged.get("x-domain-name").and_then(|v| v.as_str()),
+            Some("acme"),
+            "the merged view must include the persisted headers too"
+        );
+
+        // Export is the path that hands a session to a caller verbatim.
+        let exported = goose::session::SessionManager::instance()
+            .export_session(&sid)
+            .await
+            .expect("session should export");
+        for secret in ["tenant-key-1", "tenant-token-1"] {
+            assert!(
+                !exported.contains(secret),
+                "credential {secret} leaked through session export"
+            );
+        }
     });
 }
 

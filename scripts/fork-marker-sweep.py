@@ -64,6 +64,18 @@ MARKERS = [
     ("§12", "session_provider_credentials", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
     ("§12", "GOOSE_SUBAGENT_RESUME", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
 
+    # §14 credentials held out of the database. Losing the split silently
+    # restores plaintext keys to sessions.extension_data — the code still
+    # compiles and every feature still works, which is exactly the failure mode
+    # this sweep exists for.
+    ("§14", "split_secret_headers", "crates/goose/src/session/session_secrets.rs", "present"),
+    ("§14", "split_secret_headers", "crates/goose/src/acp/server/extensions.rs", "present"),
+    ("§14", "merged_headers", "crates/goose/src/agents/extension_manager/streamable_http.rs", "present"),
+    ("§14", "merged_headers", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
+    ("§14", "merged_headers", "crates/goose/src/acp/server.rs", "present"),
+    ("§14", "session_secrets::copy", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
+    ("§14", "session_secrets::redact", "crates/goose/src/session/session_manager.rs", "present"),
+
     # Branding
     ("brand", "moocp", "crates/goose/src/prompts/system.md", "present"),
     ("brand", "moocp", "crates/goose/src/prompts/subagent_system.md", "present"),
