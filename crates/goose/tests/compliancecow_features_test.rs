@@ -20,6 +20,8 @@ use std::sync::{Arc, LazyLock};
 
 const SET_EXTENSION_DATA: &str = "_goose/unstable/session/extension_data/set";
 const UPDATE_SESSION_PROVIDER: &str = "_goose/unstable/session/provider/update";
+const APPLY_SESSION_RECIPE: &str = "_goose/unstable/session/recipe/apply";
+const LIST_RECIPES: &str = "_goose/unstable/recipes/list";
 
 /// One root for the whole file: goose's session store is a process-wide static,
 /// so per-test roots would make later tests look at a different database.
@@ -487,6 +489,138 @@ fn allow_listed_session_headers_are_forwarded_to_the_mcp_server() {
 }
 
 // ---- request-shaping features (no server, no network) ---------------------
+
+/// §15: goose applies a recipe only at `session/new`, so a session created
+/// before the platform wired recipes in resumes with none of the recipe's
+/// extensions — the model gets no ComplianceCow tools and the chat looks broken
+/// for reasons the user cannot see. Re-applying the recipe is what makes those
+/// older chats usable, and it has to be safe to call on every resume.
+#[test]
+#[serial]
+fn applying_a_recipe_gives_an_existing_session_its_extensions() {
+    let root_path = TEST_ROOT.path().to_string_lossy().to_string();
+    let recipe_dir = tempfile::tempdir().expect("recipe dir");
+    let recipe_path = recipe_dir.path().join("cow-probe.yaml");
+    std::fs::write(
+        &recipe_path,
+        r#"version: 1.0.0
+title: Cow Probe
+description: fixture recipe for the recipe-apply gate
+instructions: probe
+extensions:
+  - type: platform
+    name: todo
+"#,
+    )
+    .expect("write recipe");
+
+    let _env = env_lock::lock_env([
+        ("GOOSE_PATH_ROOT", Some(root_path.as_str())),
+        ("GOOSE_DISABLE_KEYRING", Some("1")),
+        (
+            "GOOSE_RECIPE_PATH",
+            Some(recipe_dir.path().to_string_lossy().as_ref()),
+        ),
+    ]);
+
+    run_test(async move {
+        let openai = common_tests::fixtures::OpenAiFixture::new(
+            vec![],
+            Arc::new(EnforceSessionId::default()),
+        )
+        .await;
+        let mut conn = AcpServerConnection::new(
+            TestConnectionConfig {
+                data_root: Paths::data_dir(),
+                ..Default::default()
+            },
+            openai,
+        )
+        .await;
+
+        // A session created without a recipe — the shape every pre-recipe chat is in.
+        let session = conn.new_session().await.expect("new session");
+        let sid = {
+            use common_tests::fixtures::Session as _;
+            session.session.session_id().0.to_string()
+        };
+
+        let recipes = send_custom(conn.cx(), LIST_RECIPES, serde_json::json!({}))
+            .await
+            .expect("recipes/list should succeed");
+        let recipe_id = recipes["recipes"]
+            .as_array()
+            .and_then(|entries| {
+                entries.iter().find_map(|entry| {
+                    entry["file_path"]
+                        .as_str()
+                        .filter(|path| path.contains("cow-probe"))
+                        .and(entry["id"].as_str())
+                })
+            })
+            .expect("the fixture recipe must be listed")
+            .to_string();
+
+        let extension_names = |data: &goose::session::ExtensionData| -> Vec<String> {
+            data.get_extension_state("enabled_extensions", "v0")
+                .and_then(|value| value.get("extensions").cloned())
+                .and_then(|value| value.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|ext| ext.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect()
+        };
+
+        send_custom(
+            conn.cx(),
+            APPLY_SESSION_RECIPE,
+            serde_json::json!({"sessionId": sid, "recipeId": recipe_id}),
+        )
+        .await
+        .expect("recipe/apply should succeed");
+
+        let after = goose::session::SessionManager::instance()
+            .get_session(&sid, false)
+            .await
+            .expect("session should load");
+        let names = extension_names(&after.extension_data);
+        assert!(
+            names.iter().any(|n| n == "todo"),
+            "the recipe's extension must be attached to the existing session, got {names:?}"
+        );
+
+        // Every resume calls this, so a second apply must not change the result.
+        send_custom(
+            conn.cx(),
+            APPLY_SESSION_RECIPE,
+            serde_json::json!({"sessionId": sid, "recipeId": recipe_id}),
+        )
+        .await
+        .expect("a second recipe/apply should succeed");
+
+        let twice = goose::session::SessionManager::instance()
+            .get_session(&sid, false)
+            .await
+            .expect("session should load");
+        assert_eq!(
+            names,
+            extension_names(&twice.extension_data),
+            "applying the same recipe twice must be a no-op"
+        );
+
+        // An unknown id must be rejected, not silently wipe the session's extensions.
+        assert!(
+            send_custom(
+                conn.cx(),
+                APPLY_SESSION_RECIPE,
+                serde_json::json!({"sessionId": sid, "recipeId": "no-such-recipe"}),
+            )
+            .await
+            .is_err(),
+            "an unknown recipe id must be an error"
+        );
+    });
+}
 
 fn json_contains_key(value: &serde_json::Value, key: &str) -> bool {
     match value {

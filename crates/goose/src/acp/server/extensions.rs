@@ -36,6 +36,46 @@ impl GooseAcpAgent {
         Ok(EmptyResponse {})
     }
 
+    /// ComplianceCow custom method: attach a recipe's extensions to a session
+    /// that was created without them. Sessions predating the platform's recipe
+    /// wiring carry no recipe extensions, so resuming one gives the model none
+    /// of the recipe's tools.
+    ///
+    /// The session ends up with the same extension set `session/new` builds for
+    /// a recipe — configured builtins plus the recipe's. It replaces rather than
+    /// merges, so it is only correct where the recipe owns the session's
+    /// extensions, which is exactly the platform's case.
+    pub(super) async fn on_apply_session_recipe(
+        &self,
+        req: ApplySessionRecipeRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        let session = self
+            .session_manager
+            .get_session(&req.session_id, false)
+            .await
+            .internal_err()?;
+
+        let (recipe, _recipe_dir) = self.load_recipe_by_id(&req.recipe_id).await?;
+
+        let config = Config::global();
+        let extension_data = self.build_enabled_extensions_data(
+            config,
+            &session,
+            Vec::new(),
+            None,
+            recipe.extensions.as_deref(),
+        )?;
+
+        self.session_manager
+            .update(&req.session_id)
+            .extension_data(extension_data)
+            .apply()
+            .await
+            .internal_err()?;
+
+        Ok(EmptyResponse {})
+    }
+
     /// ComplianceCow custom method: merge raw key/value entries into a session's
     /// `extension_data` (e.g. `websocket_headers.v0`). Merges so a partial update
     /// doesn't clobber other extension state. This is the source the

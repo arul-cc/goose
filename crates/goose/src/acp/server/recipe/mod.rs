@@ -73,6 +73,23 @@ impl GooseAcpAgent {
         Ok(resolved)
     }
 
+    /// Load a recipe by library id. Shares `resolve_recipe_path_by_id` with the
+    /// `session/new` path so a recipe id always resolves to the same file,
+    /// whether it is applied at creation or re-applied to an existing session.
+    pub(in crate::acp::server) async fn load_recipe_by_id(
+        &self,
+        id: &str,
+    ) -> Result<(Recipe, PathBuf), agent_client_protocol::Error> {
+        let path = self.resolve_recipe_path_by_id(id).await?;
+        let recipe = load_recipe_from_path(&path).internal_err_ctx("Failed to load recipe")?;
+        let recipe_dir = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| get_recipe_library_dir(true));
+        validate_recipe(&recipe, &recipe_dir)?;
+        Ok((recipe, recipe_dir))
+    }
+
     async fn resolve_recipe_path_by_id(
         &self,
         id: &str,

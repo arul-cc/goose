@@ -54,6 +54,14 @@ impl GooseAcpAgent {
         self.on_update_session_provider(req).await
     }
 
+    #[custom_method(ApplySessionRecipeRequest)]
+    async fn dispatch_apply_session_recipe(
+        &self,
+        req: ApplySessionRecipeRequest,
+    ) -> Result<EmptyResponse, agent_client_protocol::Error> {
+        self.on_apply_session_recipe(req).await
+    }
+
     #[custom_method(SetSessionExtensionDataRequest)]
     async fn dispatch_set_session_extension_data(
         &self,
