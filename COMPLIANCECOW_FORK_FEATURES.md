@@ -6,8 +6,8 @@ WebSocket↔SSE bridge). Use it as the single source of truth when rebasing onto
 new upstream, onboarding, or restoring a feature.
 
 - **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — branch
-  `acp-migration`, rebased onto `block/goose` `main` **2026-08-27**
-  (upstream `caf59517c`, goose 1.48.0)
+  `acp-migration`, rebased onto `block/goose` `main` **2026-09-21**
+  (upstream `e629eea1d`, goose 1.51.0)
 - **CowGooseService (Go):** `/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/`
 - **cow-mcp (Python):** `http://0.0.0.0:45678/mcp`
 
@@ -45,6 +45,65 @@ feature-by-feature reconciliation. New crate layout:
 ---
 
 ## Sync log
+
+### 2026-09-21 — 8 upstream commits (1.51.0, no version bump)
+
+Four days of upstream, rebased onto `e629eea1d`. **44 fork commits replayed,
+zero conflicts.**
+
+Exactly one file was touched by both sides: `crates/goose-providers/src/anthropic.rs`.
+Upstream's `8fd84be23` deleted the hardcoded `ANTHROPIC_KNOWN_MODELS` list in
+favour of `known_models_from_registry()`; §6's `metadata` forwarding lives inside
+`create_request`, a different function. Git merged them without asking.
+
+The check worth repeating on every sync: after the rebase, the tree differed from
+the pre-rebase tree in **exactly** the 23 files upstream touched, and nothing
+else. That is stronger than a green test run — it proves no fork file was
+altered, dropped, or reformatted in passing.
+
+```bash
+diff <(git diff --name-only <old-base> upstream/main | sort) \
+     <(git diff --name-only backup/pre-sync-<date> HEAD | sort)
+```
+
+**Trap:** the rebase halted partway with `error: Your local changes to the
+following files would be overwritten by merge`, naming `acp/server.rs` and
+`providers/openai_def.rs` — while `git status` reported a clean tree and
+`git diff` was empty. Stale index stat data, not real changes.
+`git update-index --refresh` followed by `git rebase --continue` cleared it and
+the rebase ran to completion. Do not resolve this one by stashing or resetting;
+there is nothing to stash.
+
+Verification after: 42/42 fork markers, 11/11 fork feature tests, clippy and
+`cargo fmt --check` clean. `cargo test -p goose --lib` at 2303 passed / 6 failed
+— the identical six as before the rebase (4 rustls `CryptoProvider` in the
+gcpauth/JWT tests, `state_machine::provider_lifecycle` and
+`test_all_platform_extensions`, both asserting upstream's branding wording).
+
+Follow-ups this sync raised, neither actioned:
+- `1e83e89f5` gave upstream's OpenAI provider a custom base URL. §1-3's
+  `from_api_key(api_key, host_override)` may now be partly redundant there —
+  worth checking whether fork code can be deleted rather than carried.
+- `2090ad1c6` de-duplicates `@radix-ui` and moves `ui/pnpm-lock.yaml`; run
+  `pnpm install` before building the desktop app.
+
+### 2026-09-17 — 157 upstream commits (1.48.0 → 1.51.0) — reconstructed
+
+**This sync was never logged; the entry below is inferred from git, not from a
+record of the work.** It surfaced on 2026-09-21 because the header block still
+named `caf59517c` / 1.48.0 while `Cargo.toml` read 1.51.0. `caf59517c` was
+correct when written — the gap is this sync, which moved the merge base to
+`d213a3b13` (2026-09-17, "feat: add Live voice conversations to the desktop
+app", #12093) without updating the registry.
+
+What can be established: `backup/pre-sync-20260917` still points at the
+pre-rebase tip (`78a39736a`), and its merge base with upstream is `caf59517c`,
+which brackets the sync. Its conflicts, resolutions and verification results are
+not recoverable.
+
+The lesson is the one this file exists to enforce: **a sync that isn't logged
+here leaves the next sync guessing at its own starting point.** Write the entry
+in the same commit that moves the branch.
 
 ### 2026-08-27 — 175 upstream commits (1.46.0 → 1.48.0)
 
