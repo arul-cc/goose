@@ -6,8 +6,8 @@ WebSocket↔SSE bridge). Use it as the single source of truth when rebasing onto
 new upstream, onboarding, or restoring a feature.
 
 - **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — branch
-  `acp-migration`, rebased onto `block/goose` `main` **2026-09-21**
-  (upstream `e629eea1d`, goose 1.51.0)
+  `acp-migration`, rebased onto `block/goose` `main` **2026-09-24**
+  (upstream `80c119758`, goose 1.52.0)
 - **CowGooseService (Go):** `/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/`
 - **cow-mcp (Python):** `http://0.0.0.0:45678/mcp`
 
@@ -45,6 +45,81 @@ feature-by-feature reconciliation. New crate layout:
 ---
 
 ## Sync log
+
+### 2026-09-24 — 24 upstream commits (1.51.0 → 1.52.0, includes Jev)
+
+Rebased onto `upstream/main` at `80c119758`. **45 fork commits replayed, zero
+conflicts** — despite nine files touched by both sides, against one last sync:
+`Cargo.lock`, `Justfile`, `goose-cli/src/session/mod.rs`, both provider formats
+(`anthropic.rs`, `openai.rs`), `goose/Cargo.toml`, `acp/server.rs`,
+`extension_manager/mod.rs` and `extension_manager/streamable_http.rs`.
+
+**Target was `main`, not the `v1.52.0` tag.** The tag is not an ancestor of
+`main`: it sits on a release branch whose only extra commits are the
+branch-open chore (`aa5b2fcc8`) and a cherry-pick (`302b60806`) of a change
+already on `main` as `9fd1051bb`. `main` carries all of the release, is already
+versioned 1.52.0, and has seven later fixes. Basing on the tag would have left
+the next sync to unpick those duplicates.
+
+With nine shared files the tree-diff check from the last entry is weaker — it
+cannot see inside a file both sides edited. The check that carries weight here
+is range-diff, which compares every fork patch before and after:
+
+```bash
+git range-diff <old-base>..backup/pre-sync-<date> upstream/main..HEAD
+```
+
+All 45 came back `=`: every hunk applied with identical content.
+
+The stale-index halt from the last sync recurred, on the §13 commit
+(`session_manager.rs`). Same fix — `git update-index --refresh`, then
+`git rebase --continue`. Treat it as expected on this machine, not a surprise.
+
+**Jev (TypeSafe) arrived, but nothing uses it yet.** `8a460f964` adds a
+decisions provider — `goose-providers/src/decision.rs`, `typesafe.rs` (host
+`api.typesafe.ai`, model `jev-latest`) and an OpenRouter equivalent — exported
+through the GDK bindings. No part of the goose agent calls it: no routing, no
+tool gating, and no tenant data sent to TypeSafe by default. Using it means
+writing the integration ourselves.
+
+**The lib test command changed.** `e678c3b64` (lean ACP-only binary) made
+`goose`'s default features empty, so a bare `cargo test -p goose --lib` no
+longer compiles — upstream's own test code references `Scheduler`, now behind
+the `scheduler` feature. Upstream CI passes an explicit list; the verification
+commands below now do too. `goose-cli`'s defaults still enable every feature, so
+normal and deployed builds are unaffected. The new `goose-acp` binary
+(`just build-lean`) is optional.
+
+**The MCP redirect guard is safe for our setup.** `6a2c3dadf` sets
+`redirect::Policy::none()` on the streamable-HTTP client — redirects are
+surfaced, never followed. Probed against the live cow-mcp: `/mcp` returns 200,
+`/mcp/` returns 307. All ten recipes use `/mcp`, so nothing breaks. **A recipe
+URI ending in `/mcp/` will now fail to connect** instead of silently following
+the redirect. The guard also means §4's forwarded tenant headers can no longer
+reach a redirect target.
+
+**Latent §9 gap.** `78ab4b12b` renames `deepseek-v4-flash` to `deepseek-flash`
+in the declarative catalogue, which the §9 default pattern `deepseek-v4` does not
+match. The platform references only `deepseek-v4-pro`, which still matches, so
+nothing is affected today.
+
+Verification after: 42/42 fork markers, 11/11 fork feature tests, clippy and
+`cargo fmt --check` clean. `cargo test -p goose --lib` with CI's feature set:
+2325 passed / 4 failed. With those features the four old gcpauth/JWT failures
+pass, as does `test_all_platform_extensions`. The four remaining:
+`state_machine::provider_lifecycle` (asserts upstream's branding wording) and
+three `plugins::tests` that fail with `Bad CPU type in executable`.
+
+That last one is environmental and outlives the tests. `/usr/local/bin/git` is
+an Intel-only Homebrew git 2.33.0, and macOS 27 on this machine does not run
+Intel binaries. zsh falls through to `/usr/bin/git` when exec fails, so git
+works from the shell; Rust's `Command::new("git")` takes the first `PATH` match
+and stops. Any goose feature that shells out to git fails the same way.
+
+Follow-ups this sync raised, none actioned:
+- Add `deepseek-flash` to the §9 default pattern.
+- Remove the Intel git at `/usr/local/bin/git`.
+- Rebuild the running goose to pick up these fixes. Jev stays inert either way.
 
 ### 2026-09-21 — 8 upstream commits (1.51.0, no version bump)
 
@@ -481,8 +556,11 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 
 ```bash
 cargo test -p goose --test compliancecow_features_test   # 11 tests
-cargo test -p goose --lib session_secrets                 # 6 §14 tests
-cargo test -p goose --lib summon                         # incl. 4 §12 tests
+# goose's default features are empty since 1.52.0, so the lib test target needs
+# upstream CI's feature set or it does not compile:
+F=rustls-tls,code-mode,tree-sitter,live-voice,scheduler,platform-apps,chat-recall,acp-http
+cargo test -p goose --lib --no-default-features --features $F session_secrets   # 6 §14 tests
+cargo test -p goose --lib --no-default-features --features $F summon            # incl. 4 §12 tests
 ```
 Both run **offline** — no API keys, no ports, no network — and use
 `GOOSE_PATH_ROOT` + tempdirs, so they never touch `~/.config/goose` or a real
