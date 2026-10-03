@@ -6,8 +6,8 @@ WebSocket↔SSE bridge). Use it as the single source of truth when rebasing onto
 new upstream, onboarding, or restoring a feature.
 
 - **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — branch
-  `acp-migration`, rebased onto `block/goose` `main` **2026-09-24**
-  (upstream `80c119758`, goose 1.52.0)
+  `acp-migration`, rebased onto `block/goose` `main` **2026-10-03**
+  (upstream `591edd47c`, goose 1.53.0)
 - **CowGooseService (Go):** `/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/`
 - **cow-mcp (Python):** `http://0.0.0.0:45678/mcp`
 
@@ -45,6 +45,67 @@ feature-by-feature reconciliation. New crate layout:
 ---
 
 ## Sync log
+
+### 2026-10-03 — 44 upstream commits (1.52.0 → 1.53.0)
+
+Rebased onto `upstream/main` at `591edd47c`. **46 fork commits replayed, zero
+conflicts**, with twenty files touched by both sides — the most so far. The
+shared set includes `acp/server.rs`, `custom_dispatch.rs`, `custom_requests.rs`,
+`extension_manager/mod.rs`, `streamable_http.rs`, `session_manager.rs`,
+`session/mod.rs`, `providers/init.rs`, `providers/mod.rs`, both provider formats,
+`goose-providers/anthropic.rs`, and the generated `acp-schema.json` / `acp-meta.json`.
+
+**Target was `main`, not the `v1.53.0` tag** — again not an ancestor of `main`
+(`git merge-base --is-ancestor v1.53.0 upstream/main` fails).
+
+range-diff: 44 `=`, 2 `!`. Both `!` are context drift only, no fork-added line
+differs: #4 (§4) because upstream renamed `ServerInfo` to `ServerConfig` in the
+`rmcp` import beside our hunk, #42 (§14) because an upstream `mod` line beside our
+`session_secrets` line moved. The tree-diff check from 2026-09-21 also holds: the
+changed-file set after the rebase equals upstream's exactly (173 files).
+
+The stale-index halt recurred, at the §12 test commit (`summon.rs`), and cleared
+with `git update-index --refresh` then `git rebase --continue`.
+
+**`online-model-meta` is on by default in `goose-cli`.** `4dea9b483` makes every
+CLI start, including `goose serve`, send a GET to `https://models.dev/api.json`
+and cache the result under the data dir (`model_catalog/`), where it overrides the
+bundled model metadata (context limits, cost, vision). No tenant data is sent and a
+failed fetch only logs a warning. There is no runtime switch; opting out means
+building `goose-cli` without the feature. `deepseek-v4-pro[1m]` metadata can now
+differ from the bundled copy.
+
+**rmcp 3.2 → 3.4.1** (`a5a297fc5`) changed only a type name in `extension_manager`.
+`DynamicHeaderClient`'s `StreamableHttpClient` impl is untouched and the §4
+forwarding tests pass against the real client. The new HTML session export
+(`9012eac3b`) builds its session with empty `extension_data` and renders no headers
+or secrets, so §14 is unaffected.
+
+**Two environmental traps in the test build, neither from the sync** (the
+pre-sync tree behaves identically):
+- With empty default features, `libsqlx_macros` links with a "mis-aligned LINKEDIT
+  string pool" and cannot be loaded, so a bare
+  `cargo test -p goose --test compliancecow_features_test` fails to compile. The
+  Command Line Tools were updated on 2026-09-25. Passing CI's feature set builds a
+  loadable one, so run that test with `--no-default-features --features $F`.
+- `agents::state_machine::tests::agent_reply::bang_shell_visibility_is_enforced_when_state_machine_is_enabled`
+  overflows its stack in a debug test build and aborts the whole lib test binary.
+  It passes on the pre-sync tree, so something in this range raised stack use
+  (`state_machine` was touched by `add40e765` and `98c626d74`; cause not isolated).
+  Upstream CI sets `RUST_MIN_STACK=8388608`; so must the lib run.
+
+Verification after: 42/42 fork markers, 11/11 fork feature tests, clippy and
+`cargo fmt --check` clean. `cargo test -p goose --lib` with CI's feature set and
+`RUST_MIN_STACK=8388608`: 2348 passed / 4 failed — the same four as last time
+(`state_machine::provider_lifecycle` and three `plugins::tests` failing with
+`Bad CPU type in executable`). `acp::provider::tests::rejected_retry_surfaces_the_error`
+failed once under parallel load and passed in isolation and on rerun.
+
+Follow-ups this sync raised, none actioned:
+- Decide whether to build `goose-cli` without `online-model-meta` for deployment.
+- Isolate which upstream commit raised the `state_machine` test stack use.
+- Add `deepseek-flash` to the §9 default pattern (carried over from 2026-09-24).
+- Remove the Intel git at `/usr/local/bin/git` (carried over).
 
 ### 2026-09-24 — 24 upstream commits (1.51.0 → 1.52.0, includes Jev)
 
@@ -555,10 +616,13 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 ## Verifying the fork features
 
 ```bash
-cargo test -p goose --test compliancecow_features_test   # 11 tests
-# goose's default features are empty since 1.52.0, so the lib test target needs
-# upstream CI's feature set or it does not compile:
+# goose's default features are empty since 1.52.0, so the test targets need
+# upstream CI's feature set or they do not compile (on this machine the bare
+# feature-test command also hits a bad sqlx-macros link — see the 2026-10-03 entry):
 F=rustls-tls,code-mode,tree-sitter,live-voice,scheduler,platform-apps,chat-recall,acp-http
+cargo test -p goose --test compliancecow_features_test --no-default-features --features $F   # 11 tests
+# CI also sets RUST_MIN_STACK; without it a state_machine test overflows (1.53.0):
+export RUST_MIN_STACK=8388608
 cargo test -p goose --lib --no-default-features --features $F session_secrets   # 6 §14 tests
 cargo test -p goose --lib --no-default-features --features $F summon            # incl. 4 §12 tests
 ```
