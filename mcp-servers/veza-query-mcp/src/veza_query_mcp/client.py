@@ -182,8 +182,26 @@ class VezaClient:
     def vql_nodes(self, query: str) -> dict[str, Any]:
         return self.post("/api/v1/assessments/vql:nodes", {"query": query})
 
-    def vql_autocomplete(self, partial: str) -> dict[str, Any]:
-        return self.post("/api/v1/assessments/vql:autocomplete", {"query": partial})
+    def vql_autocomplete(self, partial: str, cursor_position: int | None = None) -> dict[str, Any]:
+        """GA, tenant-specific grammar + vocabulary oracle. Without
+        `cursor_position` the server ignores the query and always answers
+        ["SHOW"], which makes the endpoint look useless."""
+        pos = len(partial) if cursor_position is None else cursor_position
+        return self.post(
+            "/api/v1/assessments/vql:autocomplete",
+            {"query": partial, "cursor_position": pos},
+        )
+
+    def vql_node_types(self) -> list[str]:
+        """Every name this tenant will accept after SHOW — concrete types and
+        groupings. Narrower than the graph schema, which also lists types for
+        integrations that are not enabled here (VQL rejects those with 400)."""
+        resp = self.vql_autocomplete("SHOW ")
+        return sorted(
+            s["suggestion"]
+            for s in resp.get("suggestions") or []
+            if s.get("label") == "NODE_TYPE" and s.get("suggestion")
+        )
 
     def nl2vql(self, requirement: str) -> dict[str, Any]:
         """Veza's own natural-language → VQL. NOTE: /api/private/ — unsupported

@@ -29,7 +29,7 @@ to read, modify, or test the code:
 ```bash
 tar -xzf veza_query_mcp-0.1.0.tar.gz && cd veza_query_mcp-0.1.0
 uv sync          # installs the exact versions in uv.lock
-uv run pytest -q # 37 tests, offline — verifies the build with no tenant needed
+uv run pytest -q # 79 tests, offline — verifies the build with no tenant needed
 ```
 
 **From the wheel** (`veza_query_mcp-<version>-py3-none-any.whl`) — use this to just run
@@ -126,7 +126,8 @@ from veza_query_mcp.server import veza_health
 print(veza_health())"
 ```
 
-Expect `connected: True` and `node_types: 851`. First call fetches the ~4MB schema and
+Expect `connected: True`, `node_types` ≈ 900 and a smaller `queryable_node_types` (the
+types this tenant will actually run — see below). First call fetches the ~4MB schema and
 caches it to `~/.cache/veza-query-mcp/`; later calls are instant.
 
 ## Tools
@@ -134,29 +135,58 @@ caches it to `~/.cache/veza-query-mcp/`; later calls are instant.
 | Tool | Purpose |
 |---|---|
 | `veza_health` | Connectivity, credentials, schema cache state |
-| `veza_search_entity_types` | Find node types by keyword (851 exist; returns ~10) |
-| `veza_describe_entity_type` | Attributes, groupings, relationship count. `sample_population=true` also reports which attributes are *actually populated* |
+| `veza_search_entity_types` | Find node types by keyword (~900 in the schema; returns ~10 that the tenant can query) |
+| `veza_describe_entity_type` | Attributes, groupings, relationship count, and whether the type is `queryable` here. `sample_population=true` also reports which attributes are *actually populated* |
 | `veza_list_relationships` | Valid `RELATED TO` targets, filtered |
-| `veza_validate_vql` | Schema validation — node types, casing, relatedness, **attributes** |
+| `veza_validate_vql` | Schema validation — node types (incl. *queryable on this tenant*), casing, relatedness, **attributes**. Pass `requirement` for `semantic_warnings` |
 | `veza_plan_query` | Requirement → candidate node types and relationships, before committing to a query |
 | `veza_generate_vql` | Natural language → validated VQL (see below) |
-| `veza_execute_vql` | `mode="count"` (~17 tokens) or `mode="rows"` (sample inline, full set to file) |
+| `veza_execute_vql` | `mode="count"` (~17 tokens; a zero comes with `zero_result`) or `mode="rows"` (sample inline, full set to file) |
 | `veza_find_example_queries` | Search Veza's 500+ built-in queries for worked examples |
 
 ### Generation strategy
 
-`veza_generate_vql` asks **Veza's own `nl2vql`** first, then validates the result:
+`veza_generate_vql` asks **Veza's own `nl2vql`** first, then checks the result four ways:
 
 ```
-requirement ──▶ nl2vql ──▶ validate ──┬─ valid ──▶ return VQL
-                                      └─ invalid ─▶ return schema hints for the
-                                                    caller to author it directly
+requirement ─▶ nl2vql ─▶ repair + validate ─▶ execute count ─▶ semantic lint ─▶ result
+                            │                    │                 │
+                            │                    │                 └ requirement_match
+                            │                    └ zero?  ─▶ zero_result diagnosis
+                            └ invalid ─▶ blocked_by + schema hints (never a silent rewrite)
 ```
 
-`nl2vql` produces good VQL (`"active Okta users with access to S3 buckets"` →
-`Show OktaUser WHERE is_active = true related to S3Bucket`), but it lives on an
-unsupported `/api/private/` path and is not schema-checked — so its output is always
-validated, and the fallback also covers it disappearing.
+`nl2vql` now produces schema-valid VQL almost every time, so the failures worth catching
+have moved from syntax to **meaning**. Measured on 12 requirements against a live tenant:
+12/12 were schema-valid, 11/12 executed — and the remaining problems were ones a schema
+check cannot see. Each layer exists for one of them:
+
+| Layer | Catches | Seen live |
+|---|---|---|
+| Queryable-type check | A type in the schema that the tenant rejects (400) | nl2vql emitted `CustomHRISEmployee`; the schema-only validator passed it |
+| Semantic lint | Negation not carried over; dropped qualifiers; missing thresholds | "users **not** in any team" → `RELATED TO` (inverted); "**admin** roles" and "**sensitive** data" lost their qualifier |
+| Zero-result diagnosis | A zero that is really an empty type, an empty relationship, or over-tight filters | `GithubPersonalAccount RELATED TO GithubTeam` = 0 because no account has a direct team edge |
+| Execute count | Syntax errors the shallow parser cannot see | — |
+
+**`verified: true` means the query executed. It does not mean it answers the requirement.**
+Read `requirement_match`: `"suspect"` means the lint found something (see
+`semantic_warnings`); `"unchecked"` means the heuristics found nothing, which is not a
+guarantee. The lint is advisory and deterministic — it can flag a query, never prove one.
+
+`nl2vql` lives on an unsupported `/api/private/` path, so the validate/repair layers also
+cover it disappearing. Also: it is mostly but not perfectly deterministic (one of three
+requirements returned two different queries across four calls), so **store the VQL, not the
+requirement text, as the definition of a check.**
+
+### Queryable types
+
+The graph schema lists types for integrations a tenant has not enabled; VQL rejects them
+with `400 not a valid NodeType`. On the test tenant that is **335 of 898** schema types.
+The server asks `vql:autocomplete` (GA) what is accepted after `SHOW ` and intersects it with
+the schema, cached 24h alongside it. Search and repair suggestions only offer queryable
+types; a rejected type comes back with queryable alternatives sharing its narrowest
+grouping (`CustomHRISEmployee` → `WorkdayWorker`). If autocomplete is unreachable the
+check is skipped, not failed.
 
 ## Token discipline
 
@@ -164,7 +194,7 @@ Measured against a live tenant (byte/4 approximation — a floor, not a ceiling)
 
 | Payload | ≈ Tokens |
 |---|---|
-| Full graph schema (851 types) | **~1,000,000** |
+| Full graph schema (~900 types) | **~1,000,000** |
 | 500 saved-queries listing | **~409,000** |
 | `describe_entity_type` (lean) | ~1,200 |
 | One access-path row | ~730–1,100 |
@@ -208,6 +238,11 @@ on a sparse field. **Never conclude a field is absent from a single instance.**
 | `RESULT INCLUDE PATH SUMMARY` returns empty `path_summary_nodes` | Warned; query group membership as a direct relationship instead |
 | `ENRICH` must follow `RESULT INCLUDE`, and needs correlated types | Warned |
 | `IS NULL` / `IS NOT NULL` work but are undocumented | Parsed and validated |
+| Schema lists types the tenant cannot run (335 of 898) | `vql:autocomplete` after `SHOW ` is the authority; validate/repair/search use it |
+| `vql:autocomplete` ignores the query unless `cursor_position` is sent | Always sent |
+| nl2vql can invert relationship negation and drop qualifiers | `semantic_warnings` / `requirement_match` |
+| A zero count is ambiguous | `zero_result` sizes the source type and relationship around it |
+| `IS NULL` on a sparse attribute (e.g. `AzureADUser.last_login_at`) means "not collected", not "never" | Check population before relying on it |
 | `result_type` is `"NUMBER"` on all built-ins, yet `:nodes` returns rows | Not treated as a gate |
 | Enums serialize as **strings** despite the spec declaring integers | Read as strings |
 | Errors carry `request_id` + line/column detail | Surfaced verbatim for repair |
@@ -230,7 +265,7 @@ snapshot. Worth asking Veza to promote the graph schema endpoint to GA.
 ## Tests
 
 ```bash
-uv run pytest -q      # 37 tests, offline — no tenant or network needed
+uv run pytest -q      # 79 tests, offline — no tenant or network needed
 ```
 
 ## Background

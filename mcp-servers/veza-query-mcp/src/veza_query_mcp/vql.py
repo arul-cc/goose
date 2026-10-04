@@ -44,6 +44,7 @@ class ParsedVQL:
     enrich_types: list[str] = field(default_factory=list)
     where_attrs: list[str] = field(default_factory=list)
     projected: dict[str, list[str]] = field(default_factory=dict)
+    has_where: bool = False
     has_limit: bool = False
     result_include: str | None = None
 
@@ -89,6 +90,7 @@ def parse(query: str) -> ParsedVQL:
             if ident.lower() not in _KEYWORDS:
                 p.where_attrs.append(ident)
 
+    p.has_where = bool(re.search(r"\bWHERE\b", q, re.I))
     p.has_limit = bool(re.search(r"\bLIMIT\s+\d+", q, re.I))
     m = re.search(r"\bRESULT\s+INCLUDE\s+([A-Za-z ]+?)(?:\bWITH\b|\bENRICH\b|\bLIMIT\b|;|$)", q, re.I)
     if m:
@@ -140,6 +142,21 @@ def validate(query: str, index: SchemaIndex) -> dict[str, Any]:
                     f"Use '{canonical}'.",
                 )
             )
+        if index.is_queryable(canonical) is False:
+            # In the schema but not accepted after SHOW. Seen live: nl2vql emitted
+            # CustomHRISEmployee (an OAA template type) and Veza answered 400.
+            alts = index.alternatives(canonical)
+            findings.append(
+                Finding(
+                    "error",
+                    f"{role} '{canonical}' exists in the graph schema but is not queryable on "
+                    "this tenant — Veza rejects it with HTTP 400 'not a valid NodeType' "
+                    "(its integration is probably not enabled here).",
+                    f"Queryable alternatives: {', '.join(alts)}" if alts
+                    else "Use veza_search_entity_types to find a type this tenant has.",
+                )
+            )
+            return None
         return canonical
 
     src = check_type(p.source_type, "Source type")
