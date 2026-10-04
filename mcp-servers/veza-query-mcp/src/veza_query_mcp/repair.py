@@ -96,6 +96,16 @@ def repair(query: str, index: SchemaIndex, *, add_limit_default: int | None = 10
             continue
         canonical = index.canonical_name(raw)
         if canonical == raw:
+            if index.is_queryable(raw) is False:
+                # Exists in the schema but the tenant won't run it. Picking a
+                # replacement changes the question, so name candidates and stop.
+                alts = index.alternatives(raw)
+                res.fixes.append(Fix(
+                    "refused", f"{role}",
+                    f"'{raw}' is in the graph schema but is not queryable on this tenant "
+                    f"(Veza returns 400). Queryable types sharing its narrowest grouping: "
+                    f"{', '.join(alts) if alts else 'none'}. Swapping the type changes the "
+                    "question being asked, so it is left to you.", raw, None))
             continue
         if canonical:
             # Same identifier, different case — cannot change meaning.
@@ -105,7 +115,7 @@ def repair(query: str, index: SchemaIndex, *, add_limit_default: int | None = 10
                                  f"node types are case-sensitive", raw, canonical))
             continue
         # Unknown type — try a confident substitution.
-        cand, ratio = _closest(raw, list(index.nodes.keys()))
+        cand, ratio = _closest(raw, index.queryable_type_names())
         if cand and ratio >= SUBSTITUTION_THRESHOLD:
             res.query = _replace_identifier(res.query, raw, cand)
             res.changed = True
@@ -220,8 +230,20 @@ def repair_until_valid(
         "fixes": [f.__dict__ for f in applied],
         "errors": verdict.get("errors", []),
         "warnings": verdict.get("warnings", []),
-        "blocked_by": [f.__dict__ for f in applied if f.kind == "refused"],
+        "blocked_by": _unique([f.__dict__ for f in applied if f.kind == "refused"]),
     }
+
+
+def _unique(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each repair pass re-reports the same refusal; show it once."""
+    seen: set[str] = set()
+    out = []
+    for it in items:
+        key = repr(sorted(it.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(it)
+    return out
 
 
 # ─────────────────────────────────────── error-driven repair

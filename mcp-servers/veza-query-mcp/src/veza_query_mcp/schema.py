@@ -1,6 +1,6 @@
 """Graph schema index.
 
-The full Veza graph schema is ~4MB / ~1M tokens for 851 node types. It must
+The full Veza graph schema is ~4MB / ~1M tokens for ~900 node types. It must
 never reach a model's context. This module fetches it once, indexes it
 server-side, caches it to disk, and exposes only small slices.
 
@@ -19,16 +19,50 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .client import VezaClient
+from .client import VezaClient, VezaError
 
 CACHE_TTL_SECONDS = 24 * 3600
 
 
-def _cache_path() -> Path:
+def _cache_dir() -> Path:
     root = os.environ.get("VEZA_MCP_CACHE_DIR")
     base = Path(root) if root else Path.home() / ".cache" / "veza-query-mcp"
     base.mkdir(parents=True, exist_ok=True)
-    return base / "graph_schema.json"
+    return base
+
+
+def _cache_path() -> Path:
+    return _cache_dir() / "graph_schema.json"
+
+
+def _queryable_cache_path() -> Path:
+    return _cache_dir() / "queryable_types.json"
+
+
+def _fresh(path: Path) -> bool:
+    return path.exists() and time.time() - path.stat().st_mtime < CACHE_TTL_SECONDS
+
+
+def _load_queryable(client: VezaClient, *, force_refresh: bool) -> set[str] | None:
+    """Names the tenant accepts after SHOW, or None when that cannot be determined
+    (in which case callers fall back to schema-only validation)."""
+    path = _queryable_cache_path()
+    if not force_refresh and _fresh(path):
+        try:
+            return set(json.loads(path.read_text())["types"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+    try:
+        names = client.vql_node_types()
+    except VezaError:
+        return None
+    if not names:
+        return None
+    try:
+        path.write_text(json.dumps({"types": names}))
+    except OSError:
+        pass
+    return set(names)
 
 
 @dataclass
@@ -67,9 +101,18 @@ class NodeType:
 
 
 class SchemaIndex:
-    def __init__(self, nodes: dict[str, NodeType], fetched_at: float) -> None:
+    def __init__(
+        self,
+        nodes: dict[str, NodeType],
+        fetched_at: float,
+        queryable: set[str] | None = None,
+    ) -> None:
         self.nodes = nodes
         self.fetched_at = fetched_at
+        # Names this tenant actually accepts after SHOW. The graph schema is
+        # wider: it lists types for integrations that are not enabled here, and
+        # VQL rejects those with 400 "not a valid NodeType". None = unknown.
+        self.queryable = queryable
         # Case-insensitive lookup so we can correct a model's casing rather than
         # just rejecting it — VQL node types and attributes ARE case-sensitive.
         self._ci = {t.lower(): t for t in nodes}
@@ -106,22 +149,21 @@ class SchemaIndex:
 
     @classmethod
     def load(cls, client: VezaClient, *, force_refresh: bool = False) -> SchemaIndex:
+        queryable = _load_queryable(client, force_refresh=force_refresh)
         path = _cache_path()
-        if not force_refresh and path.exists():
-            age = time.time() - path.stat().st_mtime
-            if age < CACHE_TTL_SECONDS:
-                try:
-                    raw = json.loads(path.read_text())
-                    return cls(cls._index(raw), path.stat().st_mtime)
-                except (json.JSONDecodeError, KeyError):
-                    pass  # fall through to refetch
+        if not force_refresh and _fresh(path):
+            try:
+                raw = json.loads(path.read_text())
+                return cls(cls._index(raw), path.stat().st_mtime, queryable)
+            except (json.JSONDecodeError, KeyError):
+                pass  # fall through to refetch
 
         raw = client.graph_schema(unfiltered=True)
         try:
             path.write_text(json.dumps(raw))
         except OSError:
             pass  # cache is an optimisation, not a requirement
-        return cls(cls._index(raw), time.time())
+        return cls(cls._index(raw), time.time(), queryable)
 
     # ── lookups ───────────────────────────────────────────────────────────
 
@@ -137,13 +179,51 @@ class SchemaIndex:
         nt = self.resolve(type_name)
         return nt.type if nt else None
 
+    def is_queryable(self, type_name: str) -> bool | None:
+        """Can this tenant actually run `SHOW <type>`? None = cannot tell."""
+        if self.queryable is None:
+            return None
+        return (self.canonical_name(type_name) or type_name) in self.queryable
+
+    def queryable_type_names(self) -> list[str]:
+        """Concrete types worth suggesting: in the schema AND accepted by the tenant."""
+        if self.queryable is None:
+            return list(self.nodes)
+        return [t for t in self.nodes if t in self.queryable]
+
+    def alternatives(self, type_name: str, limit: int = 5) -> list[str]:
+        """Queryable types that share the narrowest grouping with `type_name`.
+
+        Used when a type exists in the schema but is not enabled on this tenant:
+        the most specific shared label (e.g. HRISUser) beats a generic one
+        (User, Identity) that every identity type carries.
+        """
+        nt = self.resolve(type_name)
+        if not nt:
+            return []
+        pool = [t for t in self.queryable_type_names() if t != nt.type]
+        shared = [
+            [t for t in pool if lab in self.nodes[t].labels]
+            for lab in nt.labels
+            if lab != nt.type
+        ]
+        shared = [m for m in shared if m]
+        return sorted(min(shared, key=len))[:limit] if shared else []
+
     def search(
-        self, keyword: str, *, integration: str | None = None, limit: int = 10
+        self,
+        keyword: str,
+        *,
+        integration: str | None = None,
+        limit: int = 10,
+        queryable_only: bool = True,
     ) -> list[dict[str, Any]]:
         kw = keyword.lower().strip()
         scored: list[tuple[int, NodeType]] = []
         for nt in self.nodes.values():
             if integration and (nt.integration or "").lower() != integration.lower():
+                continue
+            if queryable_only and self.queryable is not None and nt.type not in self.queryable:
                 continue
             hay_type = nt.type.lower()
             if kw and kw not in hay_type and kw not in nt.name.lower() and not any(
@@ -234,8 +314,11 @@ class SchemaIndex:
 
     def stats(self) -> dict[str, Any]:
         integrations = sorted({nt.integration for nt in self.nodes.values() if nt.integration})
+        queryable = len(self.queryable_type_names())
         return {
             "node_types": len(self.nodes),
+            "queryable_node_types": queryable if self.queryable is not None else None,
+            "schema_only_node_types": (len(self.nodes) - queryable) if self.queryable is not None else None,
             "integrations": len(integrations),
             "integration_list": integrations,
             "cache_age_seconds": int(time.time() - self.fetched_at),

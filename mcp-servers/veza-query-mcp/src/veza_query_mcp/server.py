@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ from mcp.server.mcpserver import MCPServer
 from .client import VezaClient, VezaError
 from .schema import SchemaIndex
 from . import repair as repairmod
+from . import semantic as semanticmod
 from . import vql as vqlmod
 
 mcp = MCPServer("veza-query")
@@ -64,6 +66,40 @@ def _err(exc: VezaError) -> dict[str, Any]:
     return {"ok": False, **exc.as_dict()}
 
 
+def _semantic_fields(requirement: str, query: str) -> dict[str, Any]:
+    warnings = semanticmod.lint(requirement, query)
+    return {
+        "requirement_match": "suspect" if warnings else "unchecked",
+        "semantic_warnings": warnings,
+    }
+
+
+def _diagnose_zero(query: str) -> dict[str, Any] | None:
+    """Explain a zero count by sizing the populations around it (<=2 counts, ~17
+    tokens each). Built from the parsed types only — the original WHERE is never
+    rewritten — so it cannot itself be wrong about the filter."""
+    p = vqlmod.parse(query)
+    if not p.source_type:
+        return None
+    idx = index()
+    src = idx.canonical_name(p.source_type) or p.source_type
+    dst = (idx.canonical_name(p.destination_type) or p.destination_type) if p.destination_type else None
+    negated = bool(re.search(r"\bNOT\s+RELATED\b", query, re.I))
+
+    if not (p.has_where or dst):
+        return semanticmod.interpret_zero(src, None, 0, None)
+    try:
+        source_total = int(client().vql_count(f"SHOW {src}").get("number_value") or 0)
+        related_total = None
+        if dst and not negated and source_total:
+            related_total = int(
+                client().vql_count(f"SHOW {src} RELATED TO {dst}").get("number_value") or 0
+            )
+    except VezaError:
+        return semanticmod.interpret_zero(src, dst, None, None, negated=negated)
+    return semanticmod.interpret_zero(src, dst, source_total, related_total, negated=negated)
+
+
 # ─────────────────────────────────────────────── discovery
 
 
@@ -89,9 +125,9 @@ def veza_search_entity_types(
 ) -> dict[str, Any]:
     """Find Veza node types (the 'tables' of the access graph) by keyword.
 
-    Start here when you don't know the exact type name. There are 851 node types;
-    this returns only the closest matches with their integration and property
-    count, so it stays small.
+    Start here when you don't know the exact type name. There are ~900 node types
+    in the schema; this returns only the closest matches that this tenant can
+    actually query, with their integration and property count, so it stays small.
 
     Args:
         keyword: e.g. "okta user", "s3", "group", "role"
@@ -149,6 +185,12 @@ def veza_describe_entity_type(
     out = {"ok": True, **nt.lean()}
     if nt.type != entity_type:
         out["casing_corrected_from"] = entity_type
+    out["queryable"] = idx.is_queryable(nt.type)
+    if out["queryable"] is False:
+        out["queryable_note"] = (
+            "Listed in the graph schema but NOT accepted by VQL on this tenant — queries "
+            f"on it fail with 400. Queryable alternatives: {', '.join(idx.alternatives(nt.type)) or 'none'}."
+        )
 
     if sample_population:
         try:
@@ -200,8 +242,13 @@ def veza_list_relationships(
 
 
 @mcp.tool()
-def veza_validate_vql(query: str) -> dict[str, Any]:
+def veza_validate_vql(query: str, requirement: str | None = None) -> dict[str, Any]:
     """Validate VQL against the live schema BEFORE running it.
+
+    Pass `requirement` (the plain-language ask) to also get `semantic_warnings`:
+    heuristic checks that the query actually expresses it — negation that was not
+    carried over ("not members of" written as RELATED TO), qualifiers that were
+    dropped ("admin", "sensitive"), thresholds missing from the query.
 
     Catches the failure Veza does not report: an invalid attribute name returns
     HTTP 200 with zero rows, which is indistinguishable from a legitimate empty
@@ -216,7 +263,12 @@ def veza_validate_vql(query: str) -> dict[str, Any]:
         idx = index()
     except VezaError as exc:
         return _err(exc)
-    return {"ok": True, **vqlmod.validate(query, idx)}
+    out = {"ok": True, **vqlmod.validate(query, idx)}
+    if requirement:
+        warnings = semanticmod.lint(requirement, query)
+        out["semantic_warnings"] = warnings
+        out["requirement_match"] = "suspect" if warnings else "unchecked"
+    return out
 
 
 @mcp.tool()
@@ -305,11 +357,16 @@ def veza_generate_vql(
                              so syntax errors only surface here
       5. repair from error — interpret Veza's diagnostic and retry
 
-    Returns `verified: true` only when the query executed successfully, with its
-    row count. Anything the repairer refused to guess at is returned under
-    `blocked_by` rather than silently patched — a query quietly rewritten into a
-    different question is worse than one that failed, because its results get
-    believed.
+    `verified: true` means the query EXECUTED successfully — it is not evidence
+    that the query answers the requirement. Read `requirement_match`: "suspect"
+    means `semantic_warnings` found something (negation not carried over, a
+    qualifier or threshold dropped); "unchecked" means the heuristics found
+    nothing, which is not a guarantee. A zero count comes with `zero_result`,
+    which separates an empty type, an empty relationship and over-tight filters.
+
+    Anything the repairer refused to guess at is returned under `blocked_by`
+    rather than silently patched — a query quietly rewritten into a different
+    question is worse than one that failed, because its results get believed.
 
     Args:
         requirement: plain-language description of what to find
@@ -374,24 +431,33 @@ def veza_generate_vql(
         if not verify:
             return {"ok": True, "verified": False, "vql": candidate,
                     "validated": True, "fixes": fixes_applied, "attempts": log,
-                    "warnings": rr.get("warnings", [])}
+                    "warnings": rr.get("warnings", []),
+                    **_semantic_fields(requirement, candidate)}
 
         # 4. prove it runs — this is where syntax errors surface
         try:
             res = client().vql_count(candidate)
             log.append({"step": f"execute#{attempt}", "ok": True})
-            return {
+            count = int(res.get("number_value") or 0)
+            out: dict[str, Any] = {
                 "ok": True,
                 "verified": True,
                 "requirement": requirement,
                 "vql": candidate,
-                "count": int(res.get("number_value") or 0),
+                "count": count,
                 "fixes": fixes_applied,
                 "substitutions": [f for f in fixes_applied if f.get("kind") == "substituted"],
                 "warnings": rr.get("warnings", []),
+                **_semantic_fields(requirement, candidate),
                 "attempts": log,
                 "next": "Fetch rows with veza_execute_vql(vql, mode='rows').",
             }
+            if out["requirement_match"] == "suspect":
+                out["next"] = ("Review semantic_warnings against the requirement before relying "
+                               "on this count or fetching rows.")
+            if count == 0:
+                out["zero_result"] = _diagnose_zero(candidate)
+            return out
         except VezaError as exc:
             # 5. interpret and retry
             interp = repairmod.interpret_api_error(exc.violations or [exc.message], idx)
@@ -469,13 +535,20 @@ def veza_execute_vql(
             resp = client().vql_count(query)
         except VezaError as exc:
             return _err(exc)
-        return {
+        count = int(resp.get("number_value") or 0)
+        out: dict[str, Any] = {
             "ok": True,
             "mode": "count",
-            "count": int(resp.get("number_value") or 0),
+            "count": count,
             "result_type": resp.get("result_type"),
             "warnings": resp.get("warnings") or [],
         }
+        if count == 0:
+            try:
+                out["zero_result"] = _diagnose_zero(query)
+            except VezaError:
+                pass  # diagnosis is a courtesy; never fail the count over it
+        return out
 
     bounded = vqlmod.add_limit(query, limit)
     try:
