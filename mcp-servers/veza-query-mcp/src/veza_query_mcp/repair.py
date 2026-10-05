@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .schema import SchemaIndex
-from .vql import parse, validate
+from .vql import PermissionLookup, parse, validate
 
 # Below this ratio a "close match" is a guess, not a correction.
 SUBSTITUTION_THRESHOLD = 0.72
@@ -80,7 +80,13 @@ def _replace_identifier(query: str, old: str, new: str) -> str:
     return "".join(parts)
 
 
-def repair(query: str, index: SchemaIndex, *, add_limit_default: int | None = 100) -> RepairResult:
+def repair(
+    query: str,
+    index: SchemaIndex,
+    *,
+    add_limit_default: int | None = 100,
+    permission_lookup: PermissionLookup | None = None,
+) -> RepairResult:
     """Attempt one pass of repair. Call repeatedly until `changed` is False."""
     res = RepairResult(query=query)
     p = parse(query)
@@ -182,6 +188,36 @@ def repair(query: str, index: SchemaIndex, *, add_limit_default: int | None = 10
                 f"for you to decide.{suggestion}",
                 p3.destination_type, None))
 
+    # ── permission names: wrong case is safe to fix; anything else is the check itself ─
+    p4 = parse(res.query)
+    src4 = index.canonical_name(p4.source_type) if p4.source_type else None
+    dst4 = (index.canonical_name(p4.destination_type) or p4.destination_type) if p4.destination_type else None
+    if permission_lookup and src4 and dst4:
+        for kind, _quant, names in p4.permissions:
+            vocab = permission_lookup(src4, dst4, kind)
+            if not vocab:
+                continue
+            by_lower = {v.lower(): v for v in vocab}
+            for name in names:
+                if name in vocab:
+                    continue
+                canon = by_lower.get(name.lower())
+                if canon:
+                    res.query = res.query.replace(f"'{name}'", f"'{canon}'").replace(f'"{name}"', f'"{canon}"')
+                    res.changed = True
+                    res.fixes.append(Fix("safe", "permission casing",
+                                         "permission names are case-sensitive; the wrong case returns 0 rows with no error",
+                                         name, canon))
+                else:
+                    near = difflib.get_close_matches(name, list(vocab), n=3, cutoff=0.6)
+                    res.fixes.append(Fix(
+                        "refused", "permission",
+                        f"'{name}' is not a valid {kind.lower()} permission for {src4} -> {dst4}. "
+                        "⚠️ Left as-is it returns 0 rows with no error, so a separation-of-duties "
+                        f"check would read as 'no conflicts'. Similar: {', '.join(near) or 'none'}. "
+                        "Permissions are the substance of the check, so no guess is made.",
+                        name, None))
+
     # ── unbounded result sets: safe to bound ───────────────────────────────
     if add_limit_default and not parse(res.query).has_limit:
         q = res.query.rstrip().rstrip(";")
@@ -194,7 +230,12 @@ def repair(query: str, index: SchemaIndex, *, add_limit_default: int | None = 10
 
 
 def repair_until_valid(
-    query: str, index: SchemaIndex, *, max_passes: int = 4, limit: int | None = 100
+    query: str,
+    index: SchemaIndex,
+    *,
+    max_passes: int = 4,
+    limit: int | None = 100,
+    permission_lookup: PermissionLookup | None = None,
 ) -> dict[str, Any]:
     """Repair repeatedly until schema-valid or no further progress is possible.
 
@@ -207,12 +248,12 @@ def repair_until_valid(
     applied: list[Fix] = []
     current = query
     for _ in range(max_passes):
-        r = repair(current, index, add_limit_default=limit)
+        r = repair(current, index, add_limit_default=limit, permission_lookup=permission_lookup)
         applied.extend(r.fixes)
         if r.changed:
             current = r.query
 
-        verdict = validate(current, index)
+        verdict = validate(current, index, permission_lookup)
         if verdict["valid"]:
             return {
                 "query": current,
@@ -223,7 +264,7 @@ def repair_until_valid(
         if not r.changed:
             break  # nothing more we can safely do
 
-    verdict = validate(current, index)
+    verdict = validate(current, index, permission_lookup)
     return {
         "query": current,
         "valid": verdict["valid"],
@@ -288,6 +329,18 @@ def interpret_api_error(violations: list[str], index: SchemaIndex) -> dict[str, 
             f"VQL syntax error at line {m.group(1)}, near '{m.group(3)}'. "
             "Check clause order: SHOW → RELATED TO → WHERE → WITH PATH → HAVING → "
             "RESULT INCLUDE → WITH QUERY OPTIONS → ENRICH."
+        )
+        return out
+
+    if re.search(r"internal server error", joined, re.I):
+        out["interpretation"] = (
+            "Veza answered HTTP 500 to this query. That is not necessarily an outage: it was "
+            "observed for malformed VQL, e.g. function-call syntax such as "
+            "FN_LIST_CONTAINS(permissions, 's3:PutObject'), which is not VQL. Run veza_health "
+            "to rule out an outage; if the server is healthy, re-author the query. List "
+            "membership is `attr LIST_CONTAINS 'x'`; permission conditions are "
+            "`RELATED TO <Type> WITH SYSTEM PERMISSIONS = ALL ('perm', ...)` "
+            "(valid names: veza_list_permissions)."
         )
         return out
 

@@ -14,9 +14,10 @@ reports "no findings", which reads as a pass.
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .schema import SchemaIndex
 
@@ -44,6 +45,9 @@ class ParsedVQL:
     enrich_types: list[str] = field(default_factory=list)
     where_attrs: list[str] = field(default_factory=list)
     projected: dict[str, list[str]] = field(default_factory=dict)
+    # WITH SYSTEM|EFFECTIVE PERMISSIONS = ALL|ANY ('a', 'b') -> (kind, quantifier, names)
+    permissions: list[tuple[str, str, list[str]]] = field(default_factory=list)
+    function_calls: list[str] = field(default_factory=list)
     has_where: bool = False
     has_limit: bool = False
     result_include: str | None = None
@@ -89,6 +93,16 @@ def parse(query: str) -> ParsedVQL:
         for ident in re.findall(rf"({_IDENT})\s*(?:{op})", clause_wo_strings, re.I):
             if ident.lower() not in _KEYWORDS:
                 p.where_attrs.append(ident)
+        # NAME( ... ) is not VQL; IN ( ... ) is the one legitimate parenthesised form.
+        for fn in re.findall(rf"\b({_IDENT})\s*\(", clause_wo_strings):
+            if fn.lower() != "in" and fn not in p.function_calls:
+                p.function_calls.append(fn)
+
+    for kind, quant, body in re.findall(
+        r"\bWITH\s+(SYSTEM|EFFECTIVE)\s+PERMISSIONS\s*=\s*(ALL|ANY)\s*\(([^)]*)\)", q, re.I
+    ):
+        names = [a or b for a, b in re.findall(r"'([^']*)'|\"([^\"]*)\"", body)]
+        p.permissions.append((kind.upper(), quant.upper(), names))
 
     p.has_where = bool(re.search(r"\bWHERE\b", q, re.I))
     p.has_limit = bool(re.search(r"\bLIMIT\s+\d+", q, re.I))
@@ -105,11 +119,20 @@ class Finding:
     fix: str | None = None
 
 
-def validate(query: str, index: SchemaIndex) -> dict[str, Any]:
+PermissionLookup = Callable[[str, str, str], "set[str] | None"]
+
+
+def validate(
+    query: str, index: SchemaIndex, permission_lookup: PermissionLookup | None = None
+) -> dict[str, Any]:
     """Validate a VQL string against the cached schema.
 
     Errors are things that will either fail or — worse — silently return nothing.
     Warnings are things that will run but may not mean what the author intended.
+
+    `permission_lookup(source, destination, kind)` returns the permission names
+    the tenant accepts for that pair (or None if unknown). Without it, permission
+    names go unchecked.
     """
     findings: list[Finding] = []
     p = parse(query)
@@ -159,6 +182,19 @@ def validate(query: str, index: SchemaIndex) -> dict[str, Any]:
             return None
         return canonical
 
+    for fn in p.function_calls:
+        findings.append(
+            Finding(
+                "error",
+                f"'{fn}(...)' is function-call syntax, which is not VQL. Veza answers it with a "
+                "400 syntax error — or with an HTTP 500 that looks like an outage.",
+                "Use operators: `attr LIST_CONTAINS 'x'`, `attr CONTAINS 'x'`, `attr IN ('a','b')`. "
+                "Permission conditions belong on the relationship: "
+                "`RELATED TO <Type> WITH SYSTEM PERMISSIONS = ALL ('perm', ...)` "
+                "(valid names: veza_list_permissions).",
+            )
+        )
+
     src = check_type(p.source_type, "Source type")
     dst = check_type(p.destination_type, "Destination type") if p.destination_type else None
     for it in p.intermediate_types:
@@ -190,6 +226,35 @@ def validate(query: str, index: SchemaIndex) -> dict[str, Any]:
                     "Use veza_list_relationships to see valid targets.",
                 )
             )
+
+    # Permission names are the other silent-zero trap: an unknown or wrongly-cased
+    # name returns 200 with 0 rows, so a separation-of-duties check reads as clean.
+    if permission_lookup and src and dst:
+        for kind, _quant, names in p.permissions:
+            vocab = permission_lookup(src, dst, kind)
+            if not vocab:
+                continue
+            by_lower = {v.lower(): v for v in vocab}
+            for name in names:
+                if name in vocab:
+                    continue
+                if name.lower() in by_lower:
+                    findings.append(Finding(
+                        "error",
+                        f"Permission '{name}' has the wrong casing — permission names are "
+                        "case-sensitive and Veza returns 0 rows (no error) for the wrong case.",
+                        f"Use '{by_lower[name.lower()]}'.",
+                    ))
+                    continue
+                near = difflib.get_close_matches(name, list(vocab), n=3, cutoff=0.6)
+                findings.append(Finding(
+                    "error",
+                    f"'{name}' is not a valid {kind.lower()} permission for {src} -> {dst}. "
+                    "⚠️ Veza will NOT error — it returns 200 with 0 rows, so a separation-of-duties "
+                    "check built on it reads as 'no conflicts'.",
+                    f"Did you mean: {', '.join(near)}?" if near else
+                    f"Use veza_list_permissions('{src}', '{dst}') to see valid names.",
+                ))
 
     # ── The important one: attribute names ────────────────────────────────
     # An unknown attribute does NOT error. It returns 200 with zero rows, which

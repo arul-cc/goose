@@ -29,7 +29,7 @@ to read, modify, or test the code:
 ```bash
 tar -xzf veza_query_mcp-0.1.0.tar.gz && cd veza_query_mcp-0.1.0
 uv sync          # installs the exact versions in uv.lock
-uv run pytest -q # 79 tests, offline — verifies the build with no tenant needed
+uv run pytest -q # 103 tests, offline — verifies the build with no tenant needed
 ```
 
 **From the wheel** (`veza_query_mcp-<version>-py3-none-any.whl`) — use this to just run
@@ -138,7 +138,8 @@ caches it to `~/.cache/veza-query-mcp/`; later calls are instant.
 | `veza_search_entity_types` | Find node types by keyword (~900 in the schema; returns ~10 that the tenant can query) |
 | `veza_describe_entity_type` | Attributes, groupings, relationship count, and whether the type is `queryable` here. `sample_population=true` also reports which attributes are *actually populated* |
 | `veza_list_relationships` | Valid `RELATED TO` targets, filtered |
-| `veza_validate_vql` | Schema validation — node types (incl. *queryable on this tenant*), casing, relatedness, **attributes**. Pass `requirement` for `semantic_warnings` |
+| `veza_list_permissions` | Exact permission names usable between two types (`s3:PutObject`, `DATA_DELETE`…), straight from the tenant — look these up instead of guessing |
+| `veza_validate_vql` | Schema validation — node types (incl. *queryable on this tenant*), casing, relatedness, **attributes**, **permission names**, function-call syntax. Pass `requirement` for `semantic_warnings` |
 | `veza_plan_query` | Requirement → candidate node types and relationships, before committing to a query |
 | `veza_generate_vql` | Natural language → validated VQL (see below) |
 | `veza_execute_vql` | `mode="count"` (~17 tokens; a zero comes with `zero_result`) or `mode="rows"` (sample inline, full set to file) |
@@ -177,6 +178,34 @@ guarantee. The lint is advisory and deterministic — it can flag a query, never
 cover it disappearing. Also: it is mostly but not perfectly deterministic (one of three
 requirements returned two different queries across four calls), so **store the VQL, not the
 requirement text, as the definition of a check.**
+
+### Separation of duties and permission conditions
+
+"Principal holds permission A **and** permission B" is expressed on the relationship, not in
+`WHERE`:
+
+```
+SHOW AwsIamUser { name, aws_account_id } RELATED TO S3Bucket
+  WITH SYSTEM PERMISSIONS = ALL ('s3:PutObject', 's3:DeleteObject') LIMIT 1000;
+```
+
+`ALL` = every listed permission, `ANY` = at least one. `SYSTEM` names are the platform's own;
+`EFFECTIVE` names are Veza's abstract ones (`DATA_READ`, `DATA_DELETE`…). Rows are one per
+principal. On the test tenant `ALL('s3:PutObject','s3:DeleteObject')` returned 61 users,
+exactly the intersection of `ANY(put)` and `ANY(delete)` — nothing was missed — but that is an
+observation about one tenant, not a documented guarantee.
+
+Three traps, all guarded:
+
+| Trap | What happens | Guard |
+|---|---|---|
+| **Function-call syntax** — `WHERE FN_LIST_CONTAINS(permissions, 's3:PutObject')` is not VQL | 400, or an **HTTP 500 that looks like an outage** | Validator rejects `NAME(...)` in `WHERE` (only `IN (...)` is allowed); a 500 on a query is explained as possibly malformed, not retried blindly |
+| **Misspelled or wrongly-cased permission** | 200 with **0 rows** — a SoD check reads "no conflicts" | Names are checked against the tenant's own vocabulary (`vql:autocomplete`); wrong case is fixed, anything else is refused with near matches — never guessed |
+| **Permissions silently dropped or generalised** by nl2vql | Three named permissions became `EFFECTIVE ('DATA_DELETE','DATA_WRITE')`; another was "corrected" to a different action | `semantic_warnings` flags any permission named in the requirement that is absent from the query |
+
+Not expressible this way: configuration *state* such as "versioning suspended" or "logging
+disabled". Those are bucket attributes, so a SoD rule of the form "can change X **and** X is
+currently off" needs a separate query on the resource, joined client-side.
 
 ### Queryable types
 
@@ -241,6 +270,8 @@ on a sparse field. **Never conclude a field is absent from a single instance.**
 | Schema lists types the tenant cannot run (335 of 898) | `vql:autocomplete` after `SHOW ` is the authority; validate/repair/search use it |
 | `vql:autocomplete` ignores the query unless `cursor_position` is sent | Always sent |
 | nl2vql can invert relationship negation and drop qualifiers | `semantic_warnings` / `requirement_match` |
+| Unknown or wrongly-cased permission name → 200/0 rows | Validated against `vql:autocomplete`'s per-pair vocabulary |
+| Function-call syntax in `WHERE` → 400, sometimes **500** | Rejected locally; a 500 is interpreted as possibly malformed VQL, not an outage |
 | A zero count is ambiguous | `zero_result` sizes the source type and relationship around it |
 | `IS NULL` on a sparse attribute (e.g. `AzureADUser.last_login_at`) means "not collected", not "never" | Check population before relying on it |
 | `result_type` is `"NUMBER"` on all built-ins, yet `:nodes` returns rows | Not treated as a gate |
@@ -265,7 +296,7 @@ snapshot. Worth asking Veza to promote the graph schema endpoint to GA.
 ## Tests
 
 ```bash
-uv run pytest -q      # 79 tests, offline — no tenant or network needed
+uv run pytest -q      # 103 tests, offline — no tenant or network needed
 ```
 
 ## Background

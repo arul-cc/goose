@@ -39,6 +39,9 @@ _QUALIFIER = re.compile(
 
 _STRING = re.compile(r"'[^']*'|\"[^\"]*\"")
 
+# Provider permission names, e.g. s3:PutObject, iam:AttachRolePolicy, actions:read.
+_PERMISSION = re.compile(r"\b[a-z][a-z0-9-]*:[A-Za-z][A-Za-z0-9*]*\b")
+
 
 def _finding(kind: str, message: str, fix: str) -> dict[str, str]:
     return {"kind": kind, "message": message, "fix": fix}
@@ -103,6 +106,22 @@ def lint(requirement: str, query: str) -> list[dict[str, str]]:
             f"The requirement contains {', '.join(repr(m) for m in missing[:4])} but the query "
             "does not, so a threshold or value may have been dropped.",
             "Check the comparison values in the WHERE clause.",
+        ))
+
+    # 4. Permission names from the requirement that never reached the query. Seen
+    # live: asked for s3:PutObject + s3:PutBucketVersioning + s3:DeleteObject,
+    # nl2vql returned EFFECTIVE ('DATA_DELETE','DATA_WRITE') — a broader question
+    # that happened to return the same count as the two-permission query.
+    absent = [t for t in dict.fromkeys(_PERMISSION.findall(requirement)) if t.lower() not in q.lower()]
+    if absent:
+        out.append(_finding(
+            "permission_missing",
+            f"The requirement names {', '.join(repr(t) for t in absent[:5])} but the query does "
+            "not contain " + ("it" if len(absent) == 1 else "them") + ". A permission may have "
+            "been dropped, renamed (a misspelling corrected to a different action), or replaced "
+            "by broader abstract ones such as EFFECTIVE DATA_WRITE.",
+            "Compare the permission list in the query with the requirement; exact names come "
+            "from veza_list_permissions.",
         ))
     return out
 
