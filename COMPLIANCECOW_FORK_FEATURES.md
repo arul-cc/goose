@@ -104,8 +104,12 @@ failed once under parallel load and passed in isolation and on rerun.
 Follow-ups this sync raised, none actioned:
 - Decide whether to build `goose-cli` without `online-model-meta` for deployment.
 - Isolate which upstream commit raised the `state_machine` test stack use.
-- Add `deepseek-flash` to the §9 default pattern (carried over from 2026-09-24).
-- Remove the Intel git at `/usr/local/bin/git` (carried over).
+- Decide how `deepseek-flash` keeps thinking off: add it to the §9 default
+  pattern (covers the OpenAI-compatible format only) and/or rely on the Go-side
+  injection (covers the Anthropic route). The platform uses it today — see the
+  corrected 2026-09-24 entry.
+- Remove the Intel git at `/usr/local/bin/git` (carried over). It also breaks
+  `go build` without `-buildvcs=false`.
 
 ### 2026-09-24 — 24 upstream commits (1.51.0 → 1.52.0, includes Jev)
 
@@ -159,10 +163,18 @@ URI ending in `/mcp/` will now fail to connect** instead of silently following
 the redirect. The guard also means §4's forwarded tenant headers can no longer
 reach a redirect target.
 
-**Latent §9 gap.** `78ab4b12b` renames `deepseek-v4-flash` to `deepseek-flash`
-in the declarative catalogue, which the §9 default pattern `deepseek-v4` does not
-match. The platform references only `deepseek-v4-pro`, which still matches, so
-nothing is affected today.
+**§9 gap — the platform already uses the unmatched name.** `78ab4b12b` renames
+`deepseek-v4-flash` to `deepseek-flash` in the declarative catalogue, which the §9
+default pattern `deepseek-v4` does not match. *Corrected 2026-10-05:* this entry
+first said the platform referenced only `deepseek-v4-pro`. `sessions.db` shows
+otherwise — 7 sessions on provider `anthropic` with model `deepseek-flash`
+(2026-09-17 to 2026-09-20), all carrying `thinking: disabled`. That came from
+CowGooseService's `BuildDeepSeekThinkingParams`, not from goose: on the Anthropic
+route §9 relies on an explicit `request_params["thinking"]`, and the env-pattern
+default applies only to the OpenAI-compatible format. So thinking stays off for
+`deepseek-flash` only while the Go-side injection keeps matching the name.
+The earlier `deepseek-v4-flash` rows (58 sessions, `custom_deepseek`, last
+2026-09-01) predate the rename.
 
 Verification after: 42/42 fork markers, 11/11 fork feature tests, clippy and
 `cargo fmt --check` clean. `cargo test -p goose --lib` with CI's feature set:
