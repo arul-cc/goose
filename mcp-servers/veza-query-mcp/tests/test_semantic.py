@@ -107,6 +107,41 @@ def test_quoted_literal_present_passes():
         "Show SnowflakeUser related to SnowflakeRole WHERE name = 'ACCOUNTADMIN'")
 
 
+# ── permission names ───────────────────────────────────────────────────────
+
+def test_flags_permissions_replaced_by_abstract_ones():
+    """Observed live: three named permissions became EFFECTIVE DATA_DELETE/DATA_WRITE."""
+    r = lint(
+        "AWS users that have s3:PutObject, s3:PutBucketVersioning and s3:DeleteObject",
+        "Show AwsIamUser related to S3Bucket with effective permissions = ALL ('DATA_DELETE','DATA_WRITE')",
+    )
+    f = next(x for x in r if x["kind"] == "permission_missing")
+    assert all(n in f["message"] for n in ("s3:PutObject", "s3:PutBucketVersioning", "s3:DeleteObject"))
+
+
+def test_flags_a_permission_that_was_silently_renamed():
+    # s3:PutPublicAccessBlock is not a real action; nl2vql wrote PutBucketPublicAccessBlock.
+    r = lint(
+        "AWS users that have s3:PutBucketAcl and s3:PutPublicAccessBlock",
+        "Show AwsIamUser related to S3Bucket with system permissions = ALL "
+        "('s3:PutBucketAcl','s3:PutBucketPublicAccessBlock')",
+    )
+    msg = next(x for x in r if x["kind"] == "permission_missing")["message"]
+    assert "s3:PutPublicAccessBlock" in msg and "s3:PutBucketAcl" not in msg
+
+
+def test_permissions_present_in_the_query_pass_case_insensitively():
+    assert "permission_missing" not in kinds(
+        "users with s3:PutObject and s3:DeleteObject",
+        "Show AwsIamUser related to S3Bucket with system permissions = ALL ('s3:putobject','s3:DeleteObject')",
+    )
+
+
+def test_urls_and_times_are_not_mistaken_for_permissions():
+    assert "permission_missing" not in kinds(
+        "users reviewed per https://example.com at 10:30", "Show OktaUser")
+
+
 # ── zero-result interpretation ─────────────────────────────────────────────
 
 def test_zero_on_empty_type():

@@ -66,6 +66,45 @@ def _err(exc: VezaError) -> dict[str, Any]:
     return {"ok": False, **exc.as_dict()}
 
 
+def _vql_err(exc: VezaError) -> dict[str, Any]:
+    """_err plus a plain-language reading of Veza's error. A bare HTTP 500 on a
+    VQL call looks like an outage but has been observed for malformed syntax."""
+    out = _err(exc)
+    try:
+        interp = repairmod.interpret_api_error(exc.violations or [exc.message], index())
+    except VezaError:
+        return out
+    if interp.get("interpretation"):
+        out["interpretation"] = interp["interpretation"]
+    if interp.get("auto_fix"):
+        out["auto_fix"] = interp["auto_fix"]
+    return out
+
+
+_permission_cache: dict[tuple[str, str, str], set[str] | None] = {}
+
+
+def _permission_names(source: str, destination: str, kind: str) -> set[str] | None:
+    """Permission names this tenant accepts for source -> destination, taken from
+    vql:autocomplete (GA) so there is no static list to go stale. None means
+    unknown — groupings and pairs with no permissions modelled come back empty —
+    and callers must then skip the check rather than flag everything."""
+    key = (source, destination, kind.upper())
+    if key not in _permission_cache:
+        try:
+            resp = client().vql_autocomplete(
+                f"SHOW {source} RELATED TO {destination} WITH {kind.upper()} PERMISSIONS = "
+            )
+            names = {
+                s["suggestion"] for s in resp.get("suggestions") or []
+                if s.get("label") == "PERMISSION" and s.get("suggestion")
+            }
+            _permission_cache[key] = names or None
+        except VezaError:
+            _permission_cache[key] = None
+    return _permission_cache[key]
+
+
 def _semantic_fields(requirement: str, query: str) -> dict[str, Any]:
     warnings = semanticmod.lint(requirement, query)
     return {
@@ -238,6 +277,57 @@ def veza_list_relationships(
     return {"ok": True, **idx.relationships(from_type, to_filter=contains, limit=limit)}
 
 
+@mcp.tool()
+def veza_list_permissions(
+    from_type: str,
+    to_type: str,
+    kind: Literal["SYSTEM", "EFFECTIVE"] = "SYSTEM",
+    contains: str | None = None,
+    limit: int = 40,
+) -> dict[str, Any]:
+    """List the exact permission names usable between two node types.
+
+    Use this before writing a permission condition, e.g. for separation of duties
+    ("can both write objects AND delete them"):
+
+        SHOW AwsIamUser { name } RELATED TO S3Bucket
+          WITH SYSTEM PERMISSIONS = ALL ('s3:PutObject', 's3:DeleteObject') LIMIT 100;
+
+    `ALL` = the principal holds every listed permission; `ANY` = at least one.
+    Names are case-sensitive and a wrong or misspelled one returns 0 rows with NO
+    error — a separation-of-duties check would read as "no conflicts". SYSTEM
+    names are the platform's own (s3:PutObject); EFFECTIVE names are Veza's
+    abstract ones (DATA_READ, DATA_DELETE...). Function-call syntax such as
+    FN_LIST_CONTAINS(...) is not VQL.
+
+    An empty result means none are modelled for that pair (groupings such as
+    Resource always come back empty), not that nothing is allowed.
+
+    Args:
+        from_type: principal type, e.g. "AwsIamUser"
+        to_type: target type, e.g. "S3Bucket"
+        kind: "SYSTEM" (default) or "EFFECTIVE"
+        contains: substring filter, e.g. "Delete" or "Bucket"
+        limit: max names returned (default 40)
+    """
+    try:
+        idx = index()
+    except VezaError as exc:
+        return _err(exc)
+    src = idx.canonical_name(from_type)
+    dst = idx.canonical_name(to_type) or to_type
+    if not src:
+        return {"ok": False, "error": f"unknown node type: {from_type}",
+                "suggestions": idx.search(from_type, limit=5)}
+    names = _permission_names(src, dst, kind)
+    if not names:
+        return {"ok": True, "from": src, "to": dst, "kind": kind, "total": 0, "permissions": [],
+                "note": "No permission names are modelled for this pair (or the lookup failed)."}
+    matched = sorted(n for n in names if not contains or contains.lower() in n.lower())
+    return {"ok": True, "from": src, "to": dst, "kind": kind, "total": len(names),
+            "matched": len(matched), "permissions": matched[:limit]}
+
+
 # ─────────────────────────────────────────────── authoring
 
 
@@ -263,7 +353,7 @@ def veza_validate_vql(query: str, requirement: str | None = None) -> dict[str, A
         idx = index()
     except VezaError as exc:
         return _err(exc)
-    out = {"ok": True, **vqlmod.validate(query, idx)}
+    out = {"ok": True, **vqlmod.validate(query, idx, _permission_names)}
     if requirement:
         warnings = semanticmod.lint(requirement, query)
         out["semantic_warnings"] = warnings
@@ -331,7 +421,8 @@ def veza_plan_query(requirement: str, max_types: int = 4) -> dict[str, Any]:
         "groupings_available": ["Identity", "User", "IdPUser", "LocalUser",
                                "ServiceAccount", "AIAgent", "Resource"],
         "template": ("SHOW <SourceType> [{ projected, fields }] "
-                     "[WHERE <attr> <op> <value>] [RELATED TO <DestType>] "
+                     "[WHERE <attr> <op> <value>] [RELATED TO <DestType> "
+                     "[WITH SYSTEM PERMISSIONS = ALL|ANY ('perm1', 'perm2')]] "
                      "[WITH PATH <IntermediateType>] "
                      "[HAVING entity_result_count > N] "
                      "[RESULT INCLUDE DESTINATION NODES] LIMIT <n>;"),
@@ -406,7 +497,9 @@ def veza_generate_vql(
     fixes_applied: list[dict[str, Any]] = []
     for attempt in range(1, max_attempts + 1):
         # 2+3. repair to schema-validity
-        rr = repairmod.repair_until_valid(candidate, idx, limit=limit)
+        rr = repairmod.repair_until_valid(
+            candidate, idx, limit=limit, permission_lookup=_permission_names
+        )
         candidate = rr["query"]
         if rr["fixes"]:
             fixes_applied.extend(rr["fixes"])
@@ -517,7 +610,7 @@ def veza_execute_vql(
     """
     if not skip_validation:
         try:
-            verdict = vqlmod.validate(query, index())
+            verdict = vqlmod.validate(query, index(), _permission_names)
             if not verdict["valid"]:
                 return {
                     "ok": False,
@@ -534,7 +627,7 @@ def veza_execute_vql(
         try:
             resp = client().vql_count(query)
         except VezaError as exc:
-            return _err(exc)
+            return _vql_err(exc)
         count = int(resp.get("number_value") or 0)
         out: dict[str, Any] = {
             "ok": True,
@@ -554,7 +647,7 @@ def veza_execute_vql(
     try:
         resp = client().vql_nodes(bounded)
     except VezaError as exc:
-        return _err(exc)
+        return _vql_err(exc)
 
     # Both keys are always present; which one is populated depends on query shape.
     values = resp.get("values") or []
