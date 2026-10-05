@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -30,6 +31,18 @@ try:
     import websockets
 except ImportError:
     sys.exit("needs `websockets`: pip3 install websockets")
+
+SECRET_HEADER_NAMES = {"authorization", "x-api-key", "x-cow-security-context"}  # session_secrets.rs
+
+# How an authorization failure reads once it reaches the browser. cow-mcp catches
+# the ComplianceCow API's 401 and returns it as an ordinary tool result (isError
+# false) carrying "Status code: 401"; a rejection at the MCP transport surfaces as
+# rmcp's AuthRequired / InsufficientScope text. Bare substrings are wrong here:
+# tenant data carries "401" inside UUIDs and "Unauthorized" inside rule names.
+AUTH_FAILURE = re.compile(
+    r"status code:\s*40[13]\b|\bauth(?:orization)? required\b|\binsufficient scope\b",
+    re.IGNORECASE,
+)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 results = []
@@ -172,7 +185,7 @@ async def drive_bridge(args, headers, prompt):
                 text_len += len(frame.get("content") or "")
             elif t == "tool_response":
                 body = json.dumps(frame.get("data"), default=str)
-                unauthorized = any(m in body.lower() for m in ("401", "unauthor", "forbidden"))
+                unauthorized = bool(AUTH_FAILURE.search(body))
                 tools.append({"bytes": len(body), "unauthorized": unauthorized})
             elif t == "error":
                 errors.append(json.dumps(frame.get("data") or frame.get("content") or frame)[:300])
@@ -289,12 +302,19 @@ def check_persisted_state(args, sec_ctx):
     ext = json.loads(ext_json) if ext_json else {}
     rp = model.get("request_params") or {}
 
+    # §14: credentials live in process memory only. The forwarding checks above
+    # prove they reach cow-mcp; this proves they are not on disk.
     wh = ext.get("websocket_headers.v0") or {}
-    if "x-cow-security-context" in wh:
-        record("§4", "websocket_headers.v0 persisted", PASS,
-               f"{sorted(wh)} (lengths {[len(str(v)) for v in wh.values()]})")
+    leaked = sorted(k for k in wh if k.lower() in SECRET_HEADER_NAMES)
+    if leaked:
+        record("§14", "credentials kept out of sessions.db", FAIL,
+               f"{leaked} persisted in session {sid} — rows written before 2026-09-20 "
+               "legitimately still hold them; a newer one means split_secret_headers was bypassed")
+    elif wh:
+        record("§14", "credentials kept out of sessions.db", PASS, f"non-secret headers kept: {sorted(wh)}")
     else:
-        record("§4", "websocket_headers.v0 persisted", FAIL, f"got {sorted(wh)}")
+        record("§14", "credentials kept out of sessions.db", FAIL,
+               "websocket_headers.v0 is empty — the non-secret headers were dropped too")
 
     record("§1-3", "per-session provider", PASS if provider else FAIL,
            f"provider={provider} model={model.get('model_name')}")
