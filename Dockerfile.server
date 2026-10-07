@@ -26,24 +26,46 @@
 ARG UV_VERSION=0.12.7
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-FROM rust:1.96-bookworm AS builder
+# The builder runs on the build machine's own architecture and cross-compiles
+# for the target, so an amd64 image builds at native speed on an arm64 machine
+# instead of compiling Rust under emulation, which is many times slower:
+#
+#   docker buildx build --platform linux/amd64 -f Dockerfile.server .
+#
+# When the target matches the build machine nothing changes: no cross toolchain
+# is installed and the build is native.
+FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS builder
+ARG TARGETARCH
+ARG BUILDARCH
 
 # python3 is only needed if code-mode is re-enabled (see FEATURES below): that
 # feature pulls v8-goose, whose build script downloads a prebuilt librusty_v8
 # using Python. Kept here so raising FEATURES does not also require editing apt.
-RUN apt-get update && \
+#
+# For a cross build, Debian's cross toolchain plus the target architecture's own
+# libssl and libdbus, which the binary links against.
+RUN set -eu; \
+    apt-get update; \
     apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    pkg-config \
-    libssl-dev \
-    libdbus-1-dev \
-    libclang-dev \
-    protobuf-compiler \
-    libprotobuf-dev \
-    python3 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+      build-essential \
+      cmake \
+      pkg-config \
+      libssl-dev \
+      libdbus-1-dev \
+      libclang-dev \
+      protobuf-compiler \
+      libprotobuf-dev \
+      python3 \
+      ca-certificates; \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      dpkg --add-architecture "$TARGETARCH"; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
+        "crossbuild-essential-$TARGETARCH" \
+        "libssl-dev:$TARGETARCH" \
+        "libdbus-1-dev:$TARGETARCH"; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . .
@@ -105,11 +127,28 @@ ENV CARGO_PROFILE_RELEASE_OPT_LEVEL=${OPT_LEVEL} \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    set -eu && \
-    if [ "${BUILD_JOBS}" != "0" ]; then export CARGO_BUILD_JOBS="${BUILD_JOBS}"; fi && \
-    cargo build --release --package goose-cli --bin goose \
-      --no-default-features --features "${FEATURES}" && \
-    cp /build/target/release/goose /usr/local/bin/goose
+    set -eu; \
+    if [ "${BUILD_JOBS}" != "0" ]; then export CARGO_BUILD_JOBS="${BUILD_JOBS}"; fi; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu;  gnu=x86_64-linux-gnu ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; gnu=aarch64-linux-gnu ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH"; exit 1 ;; \
+    esac; \
+    rustup target add "$triple"; \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      under=$(echo "$triple" | tr '-' '_'); \
+      upper=$(echo "$under" | tr 'a-z' 'A-Z'); \
+      export "CARGO_TARGET_${upper}_LINKER=${gnu}-gcc" \
+             "CC_${under}=${gnu}-gcc" \
+             "CXX_${under}=${gnu}-g++" \
+             "AR_${under}=${gnu}-ar" \
+             PKG_CONFIG_ALLOW_CROSS=1 \
+             "PKG_CONFIG_LIBDIR=/usr/lib/${gnu}/pkgconfig:/usr/share/pkgconfig" \
+             "BINDGEN_EXTRA_CLANG_ARGS=--target=${gnu}"; \
+    fi; \
+    cargo build --release --target "$triple" --package goose-cli --bin goose \
+      --no-default-features --features "${FEATURES}"; \
+    cp "/build/target/$triple/release/goose" /usr/local/bin/goose
 
 # Fail the build if the fork's code is missing from the binary.
 #
@@ -152,14 +191,6 @@ RUN set -eu; \
     fi; \
     echo "fork code present"
 
-# The check above cannot catch a missing serve: the ACP dispatch it greps is
-# compiled regardless of features, so it passes on a binary that cannot start
-# the server.
-RUN /usr/local/bin/goose serve --help >/dev/null 2>&1 || { \
-      echo "goose has no 'serve' subcommand — FEATURES must include acp-http"; \
-      exit 1; }; \
-    echo "goose serve present"
-
 # Runtime stage — minimal Debian
 FROM debian:bookworm-slim
 
@@ -177,6 +208,15 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/goose /usr/local/bin/goose
+
+# The builder's fork-code check cannot catch a missing serve: the code it greps
+# for is compiled regardless of features, so it passes on a binary that cannot
+# start the server. This runs the binary, so it lives here, in the stage that
+# runs as the target architecture, rather than in the builder.
+RUN /usr/local/bin/goose serve --help >/dev/null 2>&1 || { \
+      echo "goose has no 'serve' subcommand — FEATURES must include acp-http"; \
+      exit 1; }; \
+    echo "goose serve present"
 COPY --from=uv /uv /uvx /usr/local/bin/
 
 # uv provides the interpreter, so there is no system python3 in this image.
