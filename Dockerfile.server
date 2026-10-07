@@ -70,14 +70,21 @@ ARG BUILD_JOBS=0
 # and compiling it made `goose` (lib) alone exceed a 4GB builder's memory. The
 # trim also cuts the dependency graph from 952 crates to 540.
 #
+# Since 1.52.0 `goose serve` itself is behind acp-http — without it the binary
+# has no serve subcommand and the container exits on start. scheduler backs
+# --enable-scheduler. Every cow recipe needs only `todo` (always compiled) plus
+# streamable-HTTP MCP, so platform-apps, chat-recall and bundled-mcp stay off.
+# online-model-meta stays off too, so the server does not fetch models.dev on
+# every start.
+#
 # The fork's own features are not behind any of these gates — §4 header
 # forwarding, the custom ACP methods, §6/§9 provider behaviour and §12 subagent
 # tenancy are all in the core lib — so trimming here does not touch them. The
-# assertion below is what proves that, per build, rather than assuming it.
+# assertions below are what prove that, per build, rather than assuming it.
 #
-# Re-add features here if you need them, e.g.
-#   --build-arg FEATURES=rustls-tls,code-mode
-ARG FEATURES=rustls-tls
+# Re-add features here if you need them, keeping acp-http, e.g.
+#   --build-arg FEATURES=rustls-tls,acp-http,scheduler,code-mode
+ARG FEATURES=rustls-tls,acp-http,scheduler
 
 # Almost all of a release build is LLVM optimising code, and this server spends
 # its life waiting on a remote LLM and a local SQLite file — it is not CPU-bound,
@@ -104,7 +111,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       --no-default-features --features "${FEATURES}" && \
     cp /build/target/release/goose /usr/local/bin/goose
 
-# Fail the build if the fork's own ACP methods are missing from the binary.
+# Fail the build if the fork's code is missing from the binary.
 #
 # This exists because an image built from `main` instead of `acp-migration` is
 # indistinguishable from a correct one until runtime, where it presents as
@@ -112,25 +119,30 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # SWALLOWS. The session then runs with the wrong provider, and §4 tenant headers
 # never reach cow-mcp, so MCP calls 401 with nothing obviously wrong upstream.
 #
-# Only these two are checked, and only these two are worth checking. They are the
-# fork's own additions, so their absence is exactly what "built from the wrong
-# branch" looks like. The upstream session-admin methods (info, rename, export)
-# were in this list and had to come out: their literals do not survive the release
-# build's optimisation, so the check failed on a perfectly good binary. Their
-# dispatchers carry no cfg or feature gate, so they are compiled in regardless —
-# but grep cannot prove that, and a check that cries wolf is worse than none.
+# The markers are strings the fork's code looks up at runtime, so they must be in
+# the binary, and none of them exists upstream — one per feature: §4 header
+# forwarding, §14 credential splitting, §12 subagent tenancy, §9 DeepSeek
+# thinking, §6 Anthropic caching.
+#
+# Not the ACP method names. Until 1.53.0 this checked those, but they are no
+# longer stored as contiguous strings, so the check failed on a correct binary.
+# Verified 2026-10-07 by calling the methods on that binary over ACP: both
+# dispatched, while an unknown method answered -32601.
 #
 # grep -a rather than `strings` so this does not depend on binutils.
 RUN set -eu; \
     missing=""; \
     for m in \
-      "_goose/unstable/session/provider/update" \
-      "_goose/unstable/session/extension_data/set" ; do \
+      "websocket_headers.v0" \
+      "x-cow-security-context" \
+      "cow_tenant.v0" \
+      "GOOSE_THINKING_DISABLE_MODELS" \
+      "ANTHROPIC_DISABLE_CACHE" ; do \
       grep -aqF "$m" /usr/local/bin/goose || missing="${missing} ${m}"; \
     done; \
     if [ -n "$missing" ]; then \
       echo "=============================================================="; \
-      echo "FORK METHODS MISSING from the built binary:"; \
+      echo "FORK CODE MISSING from the built binary — markers not found:"; \
       for m in $missing; do echo "    $m"; done; \
       echo; \
       echo "This binary was almost certainly built from a branch without the"; \
@@ -138,7 +150,15 @@ RUN set -eu; \
       echo "=============================================================="; \
       exit 1; \
     fi; \
-    echo "fork ACP methods present"
+    echo "fork code present"
+
+# The check above cannot catch a missing serve: the ACP dispatch it greps is
+# compiled regardless of features, so it passes on a binary that cannot start
+# the server.
+RUN /usr/local/bin/goose serve --help >/dev/null 2>&1 || { \
+      echo "goose has no 'serve' subcommand — FEATURES must include acp-http"; \
+      exit 1; }; \
+    echo "goose serve present"
 
 # Runtime stage — minimal Debian
 FROM debian:bookworm-slim
@@ -230,7 +250,12 @@ ENTRYPOINT ["/usr/local/bin/goose"]
 # goose's own default is 127.0.0.1:3284, which is unreachable from outside the
 # container. The port must match what CowGooseService dials — a mismatch there
 # presents as a hang, not an error.
-CMD ["serve", "--host", "0.0.0.0", "--port", "3000"]
+#
+# --platform desktop matches the validated setup: it resolves PATH through the
+# goose user's login shell (bash, above) before running tools and stdio
+# extensions, and advertises MCP-UI support. --enable-scheduler needs the
+# scheduler feature in FEATURES.
+CMD ["serve", "--host", "0.0.0.0", "--port", "3000", "--platform", "desktop", "--enable-scheduler"]
 
 # Static, not derived from `git remote get-url`: the local remotes carry an
 # embedded access token, which would be published with the image.
