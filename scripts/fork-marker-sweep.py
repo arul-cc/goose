@@ -61,7 +61,11 @@ MARKERS = [
     # §12 subagent multi-tenancy
     ("§12", "INHERITED_SUBAGENT_EXTENSION_STATES", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
     ("§12", "subagent_resume_enabled", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
-    ("§12", "session_provider_credentials", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
+    # Since 1.54.0 a subagent's provider is built by ProviderManager from its
+    # session, not inside summon.rs, so the tenant-key logic lives there. Losing
+    # it makes every subagent silently run on the deployment's own credentials.
+    ("§12", "tenant_credentials", "crates/goose/src/agents/provider_manager.rs", "present"),
+    ("§12", "resume_foreground_delegate", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
     ("§12", "GOOSE_SUBAGENT_RESUME", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
 
     # §14 credentials held out of the database. Losing the split silently
@@ -71,7 +75,7 @@ MARKERS = [
     ("§14", "split_secret_headers", "crates/goose/src/session/session_secrets.rs", "present"),
     ("§14", "split_secret_headers", "crates/goose/src/acp/server/extensions.rs", "present"),
     ("§14", "merged_headers", "crates/goose/src/agents/extension_manager/streamable_http.rs", "present"),
-    ("§14", "merged_headers", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
+    ("§14", "merged_headers", "crates/goose/src/agents/provider_manager.rs", "present"),
     ("§14", "merged_headers", "crates/goose/src/acp/server.rs", "present"),
     ("§14", "session_secrets::copy", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
     ("§14", "session_secrets::redact", "crates/goose/src/session/session_manager.rs", "present"),
@@ -104,6 +108,10 @@ MARKERS = [
     # signal with it. This marker is what notices.
     ("gate", "subagent_session_inherits_only_parent_tenant_state", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
     ("gate", "update_session_provider_accepts_a_google_tenant_key", "crates/goose/tests/compliancecow_features_test.rs", "present"),
+    # The tenancy gates for subagents. Both live in upstream files, so a rebase can
+    # delete them silently along with the failure signal they carry.
+    ("gate", "a_tenant_key_builds_its_own_provider_never_the_shared_one", "crates/goose/src/agents/provider_manager.rs", "present"),
+    ("gate", "resume_refuses_a_subagent_that_belongs_to_another_session", "crates/goose/src/agents/platform_extensions/summon.rs", "present"),
 ]
 
 # Behaviour we deliberately removed. A plain file-wide grep would false-positive
