@@ -2646,9 +2646,9 @@ impl GooseAcpAgent {
                 .internal_err_ctx("Failed to update provider")?;
         } else {
             agent
-                .recreate_provider_for_session(&req.session_id, &req.provider, model_config)
+                .switch_provider(&req.session_id, &req.provider, model_config)
                 .await
-                .internal_err_ctx("Failed to recreate provider")?;
+                .internal_err_ctx("Failed to switch provider")?;
         }
 
         Ok(EmptyResponse {})
