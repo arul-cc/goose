@@ -34,7 +34,9 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 #
 # When the target matches the build machine nothing changes: no cross toolchain
 # is installed and the build is native.
-FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS builder
+# Keep this in step with rust-toolchain.toml. If the image's compiler is older,
+# rustup downloads the pinned one inside the build, on every build.
+FROM --platform=$BUILDPLATFORM rust:1.99-bookworm AS builder
 ARG TARGETARCH
 ARG BUILDARCH
 
