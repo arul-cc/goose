@@ -6,8 +6,8 @@ WebSocket↔SSE bridge). Use it as the single source of truth when rebasing onto
 new upstream, onboarding, or restoring a feature.
 
 - **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — branch
-  `acp-migration`, rebased onto `block/goose` `main` **2026-10-03**
-  (upstream `591edd47c`, goose 1.53.0)
+  `acp-migration`, rebased onto `block/goose` `main` **2026-10-09**
+  (upstream `7bdeadb91`, goose 1.54.0)
 - **CowGooseService (Go):** `/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/`
 - **cow-mcp (Python):** `http://0.0.0.0:45678/mcp`
 
@@ -45,6 +45,99 @@ feature-by-feature reconciliation. New crate layout:
 ---
 
 ## Sync log
+
+### 2026-10-09 — 29 upstream commits (1.53.0 → 1.54.0), the first that needed hand-porting
+
+Rebased onto `upstream/main` at `7bdeadb91` (not the `v1.54.0` tag, which is not an
+ancestor of `main`). 268 files changed upstream, **22 shared with the fork**. 53 fork
+commits replayed: 47 identical under `range-diff`, 4 resolved by hand, and the two
+§12 commits that touched only `summon.rs` reduced to upstream's file and re-done as one
+deliberate commit (below). Three commits were added on top. Everything else — §4, §9,
+§14, §15 and the Go bridge's contract — survived with its tests green.
+
+**Why this one was different.** Upstream deleted the legacy agent loop, routed every
+session's provider through a new `ProviderManager`, moved extensions to per-inference
+leases, removed background subagents and the `orchestrator` extension, and rebuilt
+`delegate` as a foreground child that runs from its saved session record. Earlier syncs
+were conflicts to resolve; this one changed the thing §12 was written against.
+
+**Conflicts, and how each was resolved**
+- `formats/anthropic.rs` (§9/§6): both sides added a function in the same spot. Kept both.
+- `extension_manager/mod.rs` (§4): `add_extension_if_current` now takes `session_id: &str`
+  and renamed `working_dir`. Our `ConnectParams` still wants an `Option`, so it is
+  wrapped as `Some(session_id.to_string())`. An extension connection can no longer be
+  created without a session id, which only strengthens §4's per-session isolation.
+- `providers/init.rs` + `mod.rs` (§1-3): upstream deleted `create_with_working_dir` and
+  `create_with_named_model`. Kept `create_with_api_key`; dropped the dead context copies.
+- `summon.rs` (§12, three commits): not mergeable line by line. Took upstream's file and
+  re-applied the behaviour afterwards — see §12 for the new homes. The original
+  code is on `backup/pre-sync-20261009`.
+
+**What needed fixing that the textual merge did not show**
+- `Agent::recreate_provider_for_session` no longer exists. The §1-3 handler's no-key
+  branch now calls `switch_provider`, as upstream's own provider switch does. The
+  with-key branch still builds the provider and installs it through `update_provider`,
+  which places it in `ProviderManager`'s per-session slot — checked, not assumed.
+- Five new upstream struct literals of `ExtensionConfig::StreamableHttp` lacked
+  `allowed_headers` (the trap the 2026-08-27 entry predicted); all in test code.
+- **A subagent would have run on the deployment's own key.** `ProviderManager` builds a
+  session's provider from the shared global-config path whenever its slot is empty, and a
+  new subagent's slot is always empty. §12 is therefore enforced inside
+  `ProviderManager::provider_for`, before that path. See §12.
+- `rust-toolchain.toml` now pins 1.99.0; `Dockerfile.server` built on 1.96, so rustup
+  downloaded the compiler inside every build. The base image is now `rust:1.99-bookworm`.
+
+**Checked and unaffected**
+- §6 `metadata` forwarding: upstream's new generic forwarding applies params declared on a
+  *custom model* in provider config, a different source from the session's
+  `request_params`. No overlap.
+- §9 precedence: an explicit `request_params["thinking"]` still returns before upstream's
+  new adaptive-thinking logic, so DeepSeek's `thinking: disabled` and no `output_config`.
+- The recipe-session extension set, the thing the "client extension selection is the exact
+  set" change (`540df77c3`) could have broken. Same probe against the published
+  pre-sync image and the new one, both next to a real cow-mcp: `session/new` with the
+  recipe id and an empty `mcpServers` gives `cow-rules` + `todo`, unchanged after the
+  tenant headers are seeded, and `recipe/apply` on an older chat is identical and
+  idempotent. No `developer` extension appears.
+
+**Not verified — read before relying on it**
+- **`delegate` changed shape.** The child now runs in the foreground inside the loop, and
+  the old `async: true` / `load(taskId)` pattern is gone. `cow-orchestrator` lists no
+  extensions of its own and never used those, so nothing in the recipes breaks, but a
+  multi-step delegation was not run. Try one on dev.
+- **`GOOSE_SUBAGENT_RESUME` under the live loop.** Only the session-level behaviour is
+  tested (the follow-up reaches the right child; another session's is refused). The dev
+  manifest sets it to `true`.
+- A full turn with a real LLM and tool call was not re-run for this sync: the provider
+  keys had been removed from the environment.
+- The `orchestrator` platform extension is gone upstream. Configs that list it as
+  `enabled: false` are harmless; one that enables it would now point at nothing.
+
+**Verification:** 45/45 fork markers (three added, two moved — see §12), `range-diff`
+as above, `compliancecow_features_test` 11/11, clippy and `cargo fmt --check` clean.
+`cargo test -p goose --lib` with CI's feature set and `RUST_MIN_STACK=8388608`: **2264
+passed / 5 failed** — the four known (`state_machine::provider_lifecycle`, three
+`plugins::tests` on the Intel git) plus `acp::provider::tests::rejected_retry_surfaces_the_error`,
+the load-sensitive flake, which passes 3/3 in isolation. The total fell from 2352 to 2269
+because upstream deleted the legacy loop and its scenario tests. Provider crates: 917
+passed, 0 failed. The new §12 safeguards were each mutation-checked: removing one turned
+exactly its test red. Release image built from the branch: 7m12s cold, both build checks
+passed.
+
+**Operational notes**
+- **A full disk kills Docker Desktop's VM.** At 98% the build died silently mid-compile
+  and Docker would not restart; the stuck backend (up three days, ignoring SIGTERM) had to
+  be force-killed. When a build log stops advancing, check the daemon first.
+- `cargo test`/`check` runs with several feature sets leave one copy of every dependency
+  each: `target/` reached 84 GB. `scripts/clean-goose.sh` frees the 16–21 GB of
+  incremental caches without touching dependencies.
+- The Docker build cache is keyed to the compiler; changing the base image's Rust version
+  forces a full recompile (about seven minutes).
+
+Follow-ups, none actioned:
+- Exercise a real multi-step `delegate` and a resume on dev.
+- Add `deepseek-flash` to §9 or rely on the Go-side injection (carried over).
+- Remove the Intel git at `/usr/local/bin/git` (carried over).
 
 ### 2026-10-03 — 44 upstream commits (1.52.0 → 1.53.0)
 
@@ -423,24 +516,43 @@ was overwritten before it could be read. Not reproduced, not explained.
   `GOOSE_DISABLE_TELEMETRY=1` in deployment. Desktop/Electron branding (distros
   guide §D) is N/A — we ship goose-server + our own UI (§E).
 
-### §12 Subagent (summon) multi-tenancy — ported 2026-07-13
+### §12 Subagent (summon) multi-tenancy — ported 2026-07-13, re-ported 2026-10-09
 
 From Surendhar's commits `49eeb4d9`, `d7cf62a6`, `7252e54e` (written on the
 pre-ACP base `0764f508c`, forward-ported onto post-ACP upstream).
 
-- **Subagent inherits tenant context.** `create_subagent_session`
-  (`agents/platform_extensions/summon.rs`) copies the parent's
-  `cow_tenant.v0` + `websocket_headers.v0` (`INHERITED_SUBAGENT_EXTENSION_STATES`)
-  onto the subagent session, so the subagent's own MCP calls forward allow-listed
-  headers to cow-mcp. **Without this, §4 is broken for subagents.**
-- **Subagent uses the tenant's API key.** `resolve_provider` reads `x-api-key`
-  (+ `x-openai-host`/`x-anthropic-host`/`x-host`) from the parent session via
-  `session_provider_credentials()` and builds the provider with
-  `create_with_api_key` (§1-3). Errors propagate deliberately — running a subagent
-  on another tenant's global key is worse than failing.
+**Re-ported onto 1.54.0's design (2026-10-09).** Upstream deleted background
+subagents and rebuilt `delegate` as a foreground child that runs from its saved
+session record; the child's provider is no longer built in `summon.rs` but later,
+by `ProviderManager`. The old code could not be merged, so the behaviour was
+re-applied by hand — same three guarantees, new homes:
+
+- **Subagent inherits tenant context.** `handle_foreground_delegate`
+  (`agents/platform_extensions/summon.rs`) merges the parent's `cow_tenant.v0` +
+  `websocket_headers.v0` (`INHERITED_SUBAGENT_EXTENSION_STATES`) into the child's
+  extension data, in the same update that saves its extension selection (that
+  update *replaces*, so inheriting afterwards would be lost), and copies the
+  in-memory credentials across (§14). **Without this, §4 is broken for subagents.**
+- **Subagent uses the tenant's API key.** `ProviderManager::provider_for`
+  (`agents/provider_manager.rs`) calls `tenant_credentials()` — `x-api-key` plus
+  `x-openai-host`/`x-anthropic-host`/`x-host` — and builds the provider with
+  `create_with_api_key` (§1-3) **before** the shared global-config path. The order
+  matters: for ordinary providers the shared path is what an empty slot falls into,
+  so a subagent on `anthropic` would otherwise silently run on the deployment's own
+  key. Errors propagate deliberately.
+- **A key is used only for the provider it was issued for.** New in the re-port.
+  `delegate` can override `provider` by name; the old code would then have sent,
+  say, an Anthropic key to OpenAI. `x-provider-name` must match (the platform's
+  `gemini` counts as goose's `google`), otherwise the build fails.
 - **Subagent session resume.** `DelegateParams.subagent_session_id`, env-gated by
   **`GOOSE_SUBAGENT_RESUME`** (default off); when on, the delegate tool exposes the
-  param and the result text carries `[Subagent Session ID: <id>]`.
+  param and `resume_foreground_delegate` appends the follow-up to the existing child.
+  **The child must belong to the calling session** — new; session ids are sequential
+  per database, so the old code let any session resume any subagent. The result no
+  longer carries `[Subagent Session ID: <id>]`: the id is in the text ("Delegated to
+  foreground subagent <id>") and in the tool-result meta.
+  *Not exercised under the live state-machine loop* — only the session-level
+  behaviour is tested. Try it on dev before relying on it.
 - **Session naming:** skip generation when a session has no user messages.
 - **`GOOSE_LOG_CONSOLE`** enables CLI console logging (`goose-cli/src/logging.rs`).
 
@@ -468,11 +580,12 @@ session export, session copy, and the ACP session-info response.
   `on_set_session_extension_data` before the rest is persisted.
 - **Reads merge.** `merged_headers(session_id, extension_data)` layers the
   in-memory credentials over the persisted headers. The three consumers —
-  `DynamicHeaderClient` (§4), `session_provider_credentials` (§12) and
+  `DynamicHeaderClient` (§4), `tenant_credentials` (§12, `provider_manager.rs`) and
   `anthropic_user_metadata` (§6) — go through it, so their behaviour is unchanged.
-- **Subagents.** `session_secrets::copy` runs in `create_subagent_session`:
-  `INHERITED_SUBAGENT_EXTENSION_STATES` copies header *names*, so without this the
-  subagent inherits an empty key and silently falls back to global credentials.
+- **Subagents.** `session_secrets::copy` runs in `handle_foreground_delegate` (and
+  again on resume, to pick up rotated tokens): `INHERITED_SUBAGENT_EXTENSION_STATES`
+  copies header *names*, so without this the subagent inherits an empty key and
+  silently falls back to global credentials.
 - **Export redacts.** `session_secrets::redact` strips credentials from rows
   written before this change, which export otherwise hands out verbatim.
 - **Cleanup.** `delete_session` drops the session's entry.
@@ -652,7 +765,9 @@ half of the preservation gate in `.agents/workflows/sync-upstream.md`.
 | §6 `ANTHROPIC_DISABLE_CACHE` | `anthropic_disable_cache_env_strips_cache_control` |
 | §9 deepseek-v4 thinking default | `deepseek_v4_defaults_to_thinking_disabled_on_openai_format` |
 | Branding (moocp/ComplianceCow prompts) | `agent_identity_is_rebranded_to_moocp` |
-| §12 subagent tenant key + parent tenant-state inheritance | 4 tests in `summon.rs` |
+| §12 parent tenant state and credentials reach the subagent; key never persisted | `subagent_session_inherits_only_parent_tenant_state` (`summon.rs`) |
+| §12 subagent runs on the tenant key, never the shared provider; never sent to another vendor | 4 tests in `provider_manager.rs` |
+| §12 resume reuses the child; refuses another session's subagent; off by default | 3 tests in `summon.rs` |
 
 Every one was **mutation-verified**: breaking the feature it covers makes it fail,
 so a green run is meaningful rather than vacuous.
