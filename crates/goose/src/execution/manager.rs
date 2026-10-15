@@ -450,7 +450,6 @@ mod tests {
             timeout: None,
             bundled: None,
             available_tools: vec![],
-            allowed_headers: vec![],
         };
         let mut extension_data = session.extension_data.clone();
         EnabledExtensionsState::new(vec![extension])
