@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-project --no-python-downloads --python 3.12 ${PLUGIN_ROOT}/scripts/score_step.py",
+            "timeout": 5,
+            "on_failure": "allow"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-project --no-python-downloads --python 3.12 ${PLUGIN_ROOT}/scripts/score_step.py",
+            "timeout": 5,
+            "on_failure": "allow"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-project --no-python-downloads --python 3.12 ${PLUGIN_ROOT}/scripts/score_step.py",
+            "timeout": 5,
+            "on_failure": "allow"
+          }
+        ]
+      }
+    ]
+  }
+}

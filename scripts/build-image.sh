@@ -7,6 +7,7 @@
 #   ./scripts/build-image.sh --jobs 6                 # cap on a memory-bound builder
 #   ./scripts/build-image.sh --platform linux/amd64   # cross-build (slow, see below)
 #   ./scripts/build-image.sh --fast                   # opt-level=1, much quicker
+#   ./scripts/build-image.sh --with-tool-scoring      # bake in plugins/tool-scoring
 #
 # Tag defaults to <branch>-<short-sha>, plus "-dirty" when the tree has uncommitted
 # changes. That is deliberate: the last production incident here was an image built
@@ -30,7 +31,8 @@ TAG=""
 PUSH=0
 ALSO_LATEST=0
 JOBS=""
-FEATURES="rustls-tls"
+FEATURES="rustls-tls,acp-http,scheduler"   # keep in step with Dockerfile.server
+WITH_TOOL_SCORING=0
 PLATFORM=""
 NO_CACHE=0
 FAST=0
@@ -52,7 +54,8 @@ while [ $# -gt 0 ]; do
     --platform) PLATFORM="$2"; shift 2 ;;
     --no-cache) NO_CACHE=1; shift ;;
     --fast)     FAST=1; shift ;;
-    -h|--help)  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --with-tool-scoring) WITH_TOOL_SCORING=1; shift ;;
+    -h|--help)  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          die "unknown argument: $1" ;;
   esac
 done
@@ -145,6 +148,7 @@ BUILD_ARGS="--build-arg FEATURES=$FEATURES"
 BUILD_ARGS="$BUILD_ARGS --build-arg GIT_REF=$BRANCH"
 BUILD_ARGS="$BUILD_ARGS --build-arg GIT_SHA=${SHA}${DIRTY}"
 BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_DATE=$BUILD_DATE"
+BUILD_ARGS="$BUILD_ARGS --build-arg WITH_TOOL_SCORING=$WITH_TOOL_SCORING"
 [ -n "$JOBS" ]     && BUILD_ARGS="$BUILD_ARGS --build-arg BUILD_JOBS=$JOBS"
 [ -n "$PLATFORM" ] && BUILD_ARGS="$BUILD_ARGS --platform $PLATFORM"
 [ "$NO_CACHE" -eq 1 ] && BUILD_ARGS="$BUILD_ARGS --no-cache"
@@ -178,13 +182,12 @@ else
   warn "image labels ($BAKED_REF @ $BAKED_SHA) do not match this checkout ($BRANCH @ ${SHA}${DIRTY})"
 fi
 
-# The fork's own two methods only. The upstream session-admin ones (info,
-# rename, export) do not keep their string literals through a release build, so
-# checking them failed on good binaries; and their presence would say nothing
-# about which branch this came from.
+# Same runtime-string markers as Dockerfile.server. Not the ACP method names:
+# since 1.53.0 they are not stored as contiguous strings, so grepping for them
+# fails on a correct binary.
 MISSING=""
-for m in "_goose/unstable/session/provider/update" \
-         "_goose/unstable/session/extension_data/set" ; do
+for m in "websocket_headers.v0" "x-cow-security-context" "cow_tenant.v0" \
+         "GOOSE_THINKING_DISABLE_MODELS" "ANTHROPIC_DISABLE_CACHE" ; do
   if ! docker run --rm --entrypoint grep "$REF" -aqF "$m" /usr/local/bin/goose; then
     MISSING="$MISSING $m"
   fi
@@ -192,9 +195,9 @@ done
 if [ -n "$MISSING" ]; then
   echo
   for m in $MISSING; do printf '  \033[31mMISSING\033[0m %s\n' "$m"; done
-  die "the built image is missing fork ACP methods — do not deploy it"
+  die "the built image is missing fork code — do not deploy it"
 fi
-note "fork ACP methods: 2/2 present"
+note "fork code markers: 5/5 present"
 
 SIZE="$(docker image inspect --format '{{.Size}}' "$REF" 2>/dev/null || echo 0)"
 note "size:       $(( SIZE / 1048576 )) MiB"

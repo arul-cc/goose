@@ -255,6 +255,18 @@ RUN useradd -m -u 1000 -s /bin/bash goose && \
              /home/goose/.cache/uv /home/goose/.local/share/uv /home/goose/.local/bin && \
     chown -R goose:goose /home/goose
 
+# Tool-call scoring hook (plugins/tool-scoring): records a risk score for every
+# tool call and never blocks one. Off unless the image is built with
+# --build-arg WITH_TOOL_SCORING=1, because each tool call then runs a short
+# script before and after it. goose finds plugins under $HOME/.agents/plugins.
+ARG WITH_TOOL_SCORING=0
+COPY plugins/tool-scoring /opt/goose/plugins/tool-scoring
+RUN if [ "$WITH_TOOL_SCORING" = "1" ]; then \
+      mkdir -p /home/goose/.agents/plugins && \
+      cp -r /opt/goose/plugins/tool-scoring /home/goose/.agents/plugins/tool-scoring && \
+      chown -R goose:goose /home/goose/.agents; \
+    fi
+
 # Provenance. .dockerignore excludes .git/, so these cannot be computed inside
 # the build — build-image.sh passes them in. Recorded as ENV as well as LABEL so
 # `kubectl exec <pod> -- env | grep GOOSE_IMAGE` answers "which branch is this?"
