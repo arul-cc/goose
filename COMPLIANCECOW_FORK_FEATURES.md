@@ -6,8 +6,8 @@ WebSocket↔SSE bridge). Use it as the single source of truth when rebasing onto
 new upstream, onboarding, or restoring a feature.
 
 - **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — branch
-  `acp-migration`, rebased onto `block/goose` `main` **2026-10-09**
-  (upstream `7bdeadb91`, goose 1.54.0)
+  `acp-migration`, rebased onto `block/goose` `main` **2026-10-15**
+  (upstream `716bb92ce`, goose 1.55.0)
 - **CowGooseService (Go):** `/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/`
 - **cow-mcp (Python):** `http://0.0.0.0:45678/mcp`
 
@@ -45,6 +45,97 @@ feature-by-feature reconciliation. New crate layout:
 ---
 
 ## Sync log
+
+### 2026-10-15 — 34 upstream commits (1.54.0 → 1.55.0), one conflict, in §12
+
+Rebased onto `upstream/main` at `716bb92ce`. 261 files changed upstream, **20 shared
+with the fork**. 56 fork commits replayed: 52 identical under `range-diff`, 4 changed
+(§4's `extension_manager` follow-up, §14, the 1.54.0 API follow-up, and the §12 port —
+all because upstream edited the files around them), and **one real conflict**, in
+`summon.rs`. One commit was added on top. §1-3, §4, §9, §14, §15 and the Go bridge's
+contract survived with their tests green.
+
+**The conflict (§12, `summon.rs`).** Upstream's #12802 (`6ead9cb60`, "Bind subagents by
+their parent's hooks, mode and approvals") touched the same tail of the delegate path:
+- `handle_foreground_delegate` is now **`create_subagent`**.
+- The child session takes the **parent's `goose_mode`** (it was hard-coded to `Auto`).
+- The `"foreground_subagent"` result marker became the named constant
+  **`DELEGATED_META_KEY`** (`state_machine/ops_subagent.rs`, renamed from
+  `ops_foreground_subagent.rs`). The value is unchanged, but it is the key the agent
+  loop uses to recognise a delegation, so the fork's result helper must keep emitting it.
+- The result text is now "Delegated to subagent <id>".
+
+Resolved by keeping the fork's structure (`resume_foreground_delegate` and the shared
+`foreground_delegate_result` helper) and making the helper use `DELEGATED_META_KEY` and
+upstream's wording. Auto-merge carried the tenant-inheritance code across the rename.
+
+**What needed fixing that the textual merge did not show**
+- `execution/manager.rs`: upstream turned the extension in
+  `concurrent_session_creation_initializes_extensions_once` into a `Builtin`, which has
+  no `allowed_headers`. The fork's earlier addition of that field to the old literal had
+  merged onto the new one — a compile error in the lib tests only. Dropped the line
+  (separate commit `1d2d223a3`). Same trap as 2026-08-27 and 2026-10-09: struct
+  literals in tests.
+
+**Upstream changes that matter to the fork, checked**
+- **#12799 (`e9e0ab62c`) — "Leave the login-shell PATH to whoever launches goose."**
+  Going by its title and the rewrite of `developer/shell.rs` (the behaviour was not read
+  line by line), goose no longer resolves the login-shell PATH itself.
+  `Dockerfile.server` explains `--platform desktop` as doing that, so that comment is
+  probably stale. Checked on the new image: the shell tool runs and
+  the scoring hook, which runs through `uv`, finds it, so the container's own `PATH` is
+  enough. The flag itself is still accepted.
+- **#12775 (`903743ee0`) — a session's extension selection is leased and each extension
+  starts on first use** (touches `extension_manager`, §4's file). Auto-merged; the two §4
+  header-forwarding tests in `compliancecow_features_test` pass.
+- **#12846 (`3295f5e0f`) — a malformed `GOOSE_MODE` is now rejected** by the ACP
+  providers. The fork's configs set `GOOSE_MODE: auto`, which is valid.
+- #12420 (`prompt_cache_key` on OpenAI Responses requests), #12587 (provider
+  `x-request-id`), #12697 (W3C trace context to MCP tool calls), #12792 (foreground
+  subagents in the GDK crate) and #12692 (compaction) touched shared files or none, and
+  needed nothing from the fork.
+
+**Not verified — read before relying on it**
+- **`GOOSE_SUBAGENT_RESUME` under the live loop** is still covered only at session level,
+  as on 2026-10-09. Try a resume on dev.
+- **`delegate` was exercised with a stand-in model**, not a real one. The call completes
+  through the new loop and the container logs are clean, but the stand-in never calls the
+  "final output" tool, so the child made several requests before ending — most likely
+  upstream's loop nudging a model that does not comply (not confirmed), not a fork fault.
+- A full turn with a real LLM and tool call was not run; no provider keys were present.
+- `scripts/validate-compliancecow.py` (needs goose and CowGooseService up together).
+
+**Verification:** 45/45 fork markers, `range-diff` as above,
+`compliancecow_features_test` 11/11, `cargo fmt --check` clean, `clippy -D warnings` clean
+on `goose` and `goose-cli` with CI's feature set. `cargo test -p goose --lib` with that
+set and `RUST_MIN_STACK=8388608`: **2289 passed / 2 failed**, both known —
+`acp::provider::tests::rejected_retry_surfaces_the_error` (load-sensitive; passes alone)
+and `agents::state_machine::tests::provider_lifecycle`, which asserts the prompt says
+"agent called goose" while the fork rebrands the agent (§Branding). The three
+`plugins::tests` that failed on the Intel git last time passed; this run had `/usr/bin`
+first on `PATH`, so the Intel git was most likely not picked up (not isolated). Release image built from the branch: **6m33s**, with the
+`goose serve` check and the 5 fork-code markers both passing.
+
+**Operational notes**
+- **One upstream test hung the first full run.**
+  `acp::provider::tests::streamed_error_after_bare_retry_consumes_handoff_context` sat
+  idle (0% CPU) for 15 minutes under the parallel run, and passes alone in 0.56s. It is
+  upstream's, from #11204, and the fork changes nothing it exercises. Skip it with
+  `-- --skip <name>` in a full run and run it alone; do not wait on a run that has gone
+  quiet.
+- **`/usr/local/bin/ccache` is an Intel binary** ("Bad CPU type"). llama.cpp's cmake step
+  in `llama-cpp-sys-2` picks it up and a cold debug build fails there with error 126. A
+  pass-through `ccache` shim first on `PATH` works around it; the fix is to remove or
+  replace the binary, like the Intel git.
+- **The sync ran with uncommitted work in the tree.** `git rebase --autostash` set the
+  two modified tracked files aside and restored them afterwards; untracked files were
+  never in the way.
+
+Follow-ups, none actioned:
+- Update the `Dockerfile.server` comment about login-shell PATH (above).
+- Exercise a real multi-step `delegate` and a resume on dev.
+- Add `deepseek-flash` to §9 or rely on the Go-side injection (carried over).
+- Remove the Intel git and the Intel ccache from `/usr/local/bin` (carried over, extended).
 
 ### 2026-10-09 — 29 upstream commits (1.53.0 → 1.54.0), the first that needed hand-porting
 
@@ -516,7 +607,7 @@ was overwritten before it could be read. Not reproduced, not explained.
   `GOOSE_DISABLE_TELEMETRY=1` in deployment. Desktop/Electron branding (distros
   guide §D) is N/A — we ship goose-server + our own UI (§E).
 
-### §12 Subagent (summon) multi-tenancy — ported 2026-07-13, re-ported 2026-10-09
+### §12 Subagent (summon) multi-tenancy — ported 2026-07-13, re-ported 2026-10-09, adapted 2026-10-15
 
 From Surendhar's commits `49eeb4d9`, `d7cf62a6`, `7252e54e` (written on the
 pre-ACP base `0764f508c`, forward-ported onto post-ACP upstream).
@@ -527,8 +618,13 @@ session record; the child's provider is no longer built in `summon.rs` but later
 by `ProviderManager`. The old code could not be merged, so the behaviour was
 re-applied by hand — same three guarantees, new homes:
 
-- **Subagent inherits tenant context.** `handle_foreground_delegate`
-  (`agents/platform_extensions/summon.rs`) merges the parent's `cow_tenant.v0` +
+**Adapted to 1.55.0 (2026-10-15).** Upstream's #12802 renamed the entry point to
+`create_subagent`, made the child take the parent's `goose_mode`, and turned the result
+marker into `DELEGATED_META_KEY`. The tenancy guarantees above are unchanged; see the
+2026-10-15 sync-log entry for the one conflict this caused.
+
+- **Subagent inherits tenant context.** `create_subagent` (named
+  `handle_foreground_delegate` until 2026-10-15; `agents/platform_extensions/summon.rs`) merges the parent's `cow_tenant.v0` +
   `websocket_headers.v0` (`INHERITED_SUBAGENT_EXTENSION_STATES`) into the child's
   extension data, in the same update that saves its extension selection (that
   update *replaces*, so inheriting afterwards would be lost), and copies the
@@ -550,7 +646,8 @@ re-applied by hand — same three guarantees, new homes:
   **The child must belong to the calling session** — new; session ids are sequential
   per database, so the old code let any session resume any subagent. The result no
   longer carries `[Subagent Session ID: <id>]`: the id is in the text ("Delegated to
-  foreground subagent <id>") and in the tool-result meta.
+  subagent <id>") and in the tool-result meta, next to `DELEGATED_META_KEY`, the marker
+  the agent loop uses to recognise a delegation (`foreground_delegate_result` sets it).
   *Not exercised under the live state-machine loop* — only the session-level
   behaviour is tested. Try it on dev before relying on it.
 - **Session naming:** skip generation when a session has no user messages.
@@ -582,7 +679,7 @@ session export, session copy, and the ACP session-info response.
   in-memory credentials over the persisted headers. The three consumers —
   `DynamicHeaderClient` (§4), `tenant_credentials` (§12, `provider_manager.rs`) and
   `anthropic_user_metadata` (§6) — go through it, so their behaviour is unchanged.
-- **Subagents.** `session_secrets::copy` runs in `handle_foreground_delegate` (and
+- **Subagents.** `session_secrets::copy` runs in `create_subagent` (and
   again on resume, to pick up rotated tokens): `INHERITED_SUBAGENT_EXTENSION_STATES`
   copies header *names*, so without this the subagent inherits an empty key and
   silently falls back to global credentials.
