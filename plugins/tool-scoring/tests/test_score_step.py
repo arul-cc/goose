@@ -217,7 +217,8 @@ class Servers(unittest.TestCase):
         run_hook({"event": "PostToolUse", "session_id": "s", "tool_call_id": "call-1", "tool_name": "t"},
                  env={"GOOSE_SCORE_WEBHOOK": self.base + "/hook"})
         self.assertEqual([r[2]["phase"] for r in Handler.received], ["pre", "post"])
-        self.assertEqual(Handler.received[0][1]["Authorization"], "Bearer t-1")
+        self.assertEqual(Handler.received[0][1]["X-Tool-Score-Token"], "t-1")
+        self.assertNotIn("Authorization", Handler.received[0][1])
 
     def test_dead_webhook_does_not_lose_the_file_record(self):
         proc, records = run_hook(pre("t", {}), env={"GOOSE_SCORE_WEBHOOK": "http://127.0.0.1:9/"})

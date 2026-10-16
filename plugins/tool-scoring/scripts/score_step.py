@@ -16,7 +16,8 @@ goose passes the event as JSON on stdin.
 
 Records are JSON lines, keyed by tool_call_id, written to
   $GOOSE_SCORE_DIR/<session_id>.jsonl   (default ~/.local/state/goose/tool-scores)
-and, when GOOSE_SCORE_WEBHOOK is set, POSTed there as well (best effort, 1s).
+and, when GOOSE_SCORE_WEBHOOK is set, POSTed there as well (best effort, 1s), with
+GOOSE_SCORE_WEBHOOK_TOKEN in an X-Tool-Score-Token header.
 
 `risk` is 0.0-1.0, higher is riskier. `label` is low | medium | high.
 
@@ -258,7 +259,9 @@ def post_webhook(record):
     )
     token = os.environ.get("GOOSE_SCORE_WEBHOOK_TOKEN")
     if token:
-        request.add_header("Authorization", f"Bearer {token}")
+        # Not Authorization: the bridge's request middleware treats that header as a user's
+        # login token and tries to validate it.
+        request.add_header("X-Tool-Score-Token", token)
     urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SECS).close()
 
 
