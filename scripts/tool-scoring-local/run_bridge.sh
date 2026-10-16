@@ -2,6 +2,10 @@
 # Run CowGooseService (the bridge) on this machine with its output going to a log file.
 #
 #   ./scripts/tool-scoring-local/run_bridge.sh up        build, stop the old one, start it
+#   ./scripts/tool-scoring-local/run_bridge.sh up --binary PATH
+#                                                        start a prebuilt binary instead of building
+#                                                        from $COMPLIANCECOW_SRC (use it when that
+#                                                        checkout is on a branch without the features)
 #   ./scripts/tool-scoring-local/run_bridge.sh down
 #   ./scripts/tool-scoring-local/run_bridge.sh status
 #   ./scripts/tool-scoring-local/run_bridge.sh log       follow the log
@@ -53,16 +57,30 @@ case "${1:-}" in
     ;;
   log) exec tail -f "$LOG" ;;
   up)
+    shift
+    PREBUILT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --binary) [ $# -ge 2 ] || die "--binary needs a path"; PREBUILT="$2"; shift 2 ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
     [ -f "$SRC/local.env" ] || die "no $SRC/local.env"
     mkdir -p "$STATE" "$WORKDIR"
     if [ ! -s "$TOKEN_FILE" ]; then
       (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' >"$TOKEN_FILE")
     fi
-    echo "building..."
-    # Build beside the live binary and rename it into place: rewriting a running executable in
-    # place can get the process killed by macOS ("Code Signature Invalid").
-    (cd "$SERVICE" && PATH=/usr/bin:$PATH go build -buildvcs=false -o "$BIN.new" .) || die "build failed"
-    mv -f "$BIN.new" "$BIN"
+    if [ -n "$PREBUILT" ]; then
+      [ -x "$PREBUILT" ] || die "$PREBUILT is not an executable file"
+      BIN="$PREBUILT"   # started in place; a running binary is never rewritten
+      echo "using the prebuilt binary $BIN"
+    else
+      echo "building..."
+      # Build beside the live binary and rename it into place: rewriting a running executable in
+      # place can get the process killed by macOS ("Code Signature Invalid").
+      (cd "$SERVICE" && PATH=/usr/bin:$PATH go build -buildvcs=false -o "$BIN.new" .) || die "build failed"
+      mv -f "$BIN.new" "$BIN"
+    fi
     sed "s|^\\([[:space:]]*working_directory:\\).*|\\1 $WORKDIR|" "$SERVICE/configs/server.yaml" >"$STATE/server.yaml"
     grep -q "working_directory: $WORKDIR" "$STATE/server.yaml" || die "could not set working_directory in the config copy"
     stop_bridge
