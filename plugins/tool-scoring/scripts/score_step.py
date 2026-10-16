@@ -7,8 +7,9 @@
 Registered for PreToolUse, PostToolUse and PostToolUseFailure (hooks/hooks.json).
 goose passes the event as JSON on stdin.
 
-  PreToolUse          scores the call (tool name + arguments) and records it.
-                      Always answers {"decision":"allow"}: this is shadow mode.
+  PreToolUse          scores the call (tool name + arguments), checks it against the policy
+                      and records both. Answers {"decision":"allow"} unless the policy is
+                      enforcing a block (see Policy below).
   PostToolUse[Failure] records whether the call succeeded, under the same
                       tool_call_id. goose does not hand a hook the tool's output
                       in this version, so the outcome is all a post hook can add.
@@ -26,7 +27,13 @@ jev-latest) three yes/no questions about the redacted call and reads back probab
 The redacted tool name and arguments leave the pod for that service. If the scorer fails
 or times out, the record carries `error` and no risk, and the call proceeds.
 
-Whatever happens in here, the tool call is not affected: every path exits 0.
+Policy (policy.py, policy.json): every PreToolUse call is also checked against the rules in
+policy.json, and the verdict is recorded under `policy`. GOOSE_POLICY_MODE chooses what
+happens next: `shadow` (the default) records what the policy WOULD block and blocks nothing,
+`enforce` answers {"decision": "block"} so goose does not run the call, `off` skips the check.
+In shadow mode, or with the policy off, the tool call is never affected.
+
+Every path exits 0.
 """
 import fcntl
 import hashlib
@@ -35,6 +42,8 @@ import os
 import re
 import sys
 import time
+
+import policy
 
 INPUT_PREVIEW_CHARS = 400
 SCORER_TIMEOUT_SECS = float(os.environ.get("GOOSE_SCORER_TIMEOUT", "2"))
@@ -253,6 +262,25 @@ def post_webhook(record):
     urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SECS).close()
 
 
+def policy_verdict(event, scored):
+    """The policy's verdict on a PreToolUse call, as recorded, or None when the policy is off.
+
+    `decision` is what the policy says whatever the mode; `enforced` says whether goose will
+    act on it. So in shadow mode a "block" here is a call that enforce mode would have stopped.
+    """
+    mode, problem = policy.current_mode()
+    if mode == "off":
+        return None
+    try:
+        verdict = policy.evaluate(policy.load(), event.get("tool_name"), event.get("tool_input"), scored.get("risk"))
+    except policy.PolicyError as exc:
+        verdict = policy.unavailable(exc)
+    result = {"mode": mode, "enforced": mode == "enforce", **verdict}
+    if problem:
+        result["note"] = problem
+    return result
+
+
 def build_record(event):
     kind = event.get("event")
     base = {
@@ -265,7 +293,12 @@ def build_record(event):
     if kind == "PreToolUse":
         tool_input = event.get("tool_input")
         digest = hashlib.sha256(json.dumps(tool_input, default=str, sort_keys=True).encode()).hexdigest()[:16]
-        return {**base, "phase": "pre", **score_call(event), "input_sha256": digest, "input_preview": preview(tool_input)}
+        scored = score_call(event)
+        record = {**base, "phase": "pre", **scored, "input_sha256": digest, "input_preview": preview(tool_input)}
+        verdict = policy_verdict(event, scored)
+        if verdict is not None:
+            record["policy"] = verdict
+        return record
     if kind in ("PostToolUse", "PostToolUseFailure"):
         return {**base, "phase": "post", "outcome": "success" if kind == "PostToolUse" else "failure"}
     return None
@@ -273,6 +306,7 @@ def build_record(event):
 
 def main():
     kind = None
+    blocked_because = None
     try:
         event = json.loads(sys.stdin.read() or "{}")
         kind = event.get("event")
@@ -283,9 +317,16 @@ def main():
                     sink(record)
                 except Exception as exc:
                     print(f"tool-scoring: {sink.__name__} failed: {exc}", file=sys.stderr)
+            verdict = record.get("policy")
+            if verdict and verdict["enforced"] and verdict["decision"] == "block":
+                blocked_because = verdict["reason"] or "policy"
     except Exception as exc:
         print(f"tool-scoring: {type(exc).__name__}: {exc}", file=sys.stderr)
-    if kind == "PreToolUse":
+        if kind == "PreToolUse" and policy.current_mode()[0] == "enforce":
+            blocked_because = "the policy check failed"  # enforcing: an error must not become a pass
+    if blocked_because is not None:
+        print(json.dumps({"decision": "block", "reason": f"Blocked by policy: {blocked_because}"}))
+    elif kind == "PreToolUse":
         print(json.dumps({"decision": "allow"}))
     return 0
 

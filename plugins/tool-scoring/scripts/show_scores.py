@@ -8,6 +8,7 @@
   show_scores.py --session ID        one session (a prefix is enough)
   show_scores.py --follow            keep printing as new calls arrive
   show_scores.py --min-risk 0.5      only calls scored at or above this
+  show_scores.py --blocked           only calls the policy blocked, or would block in shadow mode
   show_scores.py --json              the joined records as JSON lines
   show_scores.py --dir PATH          read a copy of the directory (default $GOOSE_SCORE_DIR,
                                      then ~/.local/state/goose/tool-scores)
@@ -65,6 +66,12 @@ def join(pairs):
     return list(calls.values())
 
 
+def policy_hit(call):
+    """The policy's verdict when it says block, else None. `enforced` tells blocked from would-block."""
+    verdict = call.get("policy") or {}
+    return verdict if verdict.get("decision") == "block" else None
+
+
 def fmt_row(call):
     risk = call.get("risk")
     score = "  n/a" if risk is None else f"{risk:4.2f}"
@@ -72,9 +79,15 @@ def fmt_row(call):
     when = time.strftime("%H:%M:%S", time.localtime(call.get("ts", 0))) if call.get("ts") else "--:--:--"
     why = "; ".join(call.get("reasons") or []) or (call.get("error") or "")
     outcome = call.get("outcome") or "running"
+    hit = policy_hit(call)
+    if hit:
+        flag = "BLOCKED" if hit.get("enforced") else "would block"
+        why = f"[{flag}: {', '.join(hit.get('rules') or [])}] {why}"
+        if hit.get("enforced") and not call.get("outcome"):
+            outcome = "blocked"  # goose never runs a blocked call, so no outcome record follows
     return (
         f"{when}  {str(call.get('session_id'))[:14]:<14}  {str(call.get('tool') or '?')[:34]:<34}  "
-        f"{score} {label} {outcome:<8}  {why[:60]}"
+        f"{score} {label} {outcome:<8}  {why[:90]}"
     )
 
 
@@ -87,6 +100,7 @@ def main():
     parser.add_argument("--session", default="")
     parser.add_argument("--follow", action="store_true")
     parser.add_argument("--min-risk", type=float, default=0.0)
+    parser.add_argument("--blocked", action="store_true", help="only calls the policy blocked or would block")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -106,7 +120,7 @@ def main():
                 if "ts" in call:
                     pending[key] = call
                     risk = call.get("risk")
-                    if risk is not None and risk < args.min_risk:
+                    if (risk is not None and risk < args.min_risk) or (args.blocked and not policy_hit(call)):
                         continue
                     if args.json:
                         print(json.dumps(call), flush=True)
@@ -121,7 +135,7 @@ def main():
                         print(f"          {'':<14}  {'↳ ' + str(known.get('tool') or call['tool_call_id']):<34}  {'':<4} {'':<6} {call['outcome']}", flush=True)
             time.sleep(1)
             continue
-        calls = [c for c in join(pairs) if (c.get("risk") or 0) >= args.min_risk]
+        calls = [c for c in join(pairs) if (c.get("risk") or 0) >= args.min_risk and (not args.blocked or policy_hit(c))]
         if args.json:
             for call in calls:
                 print(json.dumps(call))

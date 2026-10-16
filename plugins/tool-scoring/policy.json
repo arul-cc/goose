@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "shell-recursive-force-delete",
+      "tool": "(^|__)(shell|execute_shell_command|bash)$",
+      "arg_pattern": "\\brm\\s+-[a-zA-Z]*(r[a-zA-Z]*f|f[a-zA-Z]*r)\\b",
+      "reason": "recursive force delete"
+    },
+    {
+      "id": "shell-pipe-to-shell",
+      "tool": "(^|__)(shell|execute_shell_command|bash)$",
+      "arg_pattern": "(curl|wget)[^|;&]*\\|\\s*(ba|z)?sh\\b",
+      "reason": "pipes a download into a shell"
+    },
+    {
+      "id": "shell-decoded-payload",
+      "tool": "(^|__)(shell|execute_shell_command|bash)$",
+      "arg_pattern": "base64\\s+(-d|--decode)[^|]*\\|\\s*(ba|z)?sh",
+      "reason": "executes a decoded payload"
+    },
+    {
+      "id": "shell-reverse-shell",
+      "tool": "(^|__)(shell|execute_shell_command|bash)$",
+      "arg_pattern": "/dev/tcp/|\\bnc(at)?\\b.*\\s-e\\b",
+      "reason": "reverse shell pattern"
+    },
+    {
+      "id": "shell-credential-files",
+      "tool": "(^|__)(shell|execute_shell_command|bash)$",
+      "arg_pattern": "/etc/(passwd|shadow)|\\.ssh/|\\.aws/credentials|\\.kube/config",
+      "reason": "reads credential files"
+    },
+    {
+      "id": "shell-environment-exfiltration",
+      "tool": "(^|__)(shell|execute_shell_command|bash)$",
+      "arg_pattern": "\\b(env|printenv)\\b[^|;]*\\|\\s*(curl|wget|nc)\\b",
+      "reason": "sends the environment to the network"
+    },
+    {
+      "id": "sql-drop",
+      "tool": "(^|__)(sql|query|execute_sql|run_sql)",
+      "arg_pattern": "(?i)\\bdrop\\s+(table|database|schema)\\b",
+      "reason": "drops database objects"
+    },
+    {
+      "id": "sql-delete-without-where",
+      "tool": "(^|__)(sql|query|execute_sql|run_sql)",
+      "arg_pattern": "(?i)\\bdelete\\s+from\\b(?![^;]*\\bwhere\\b)",
+      "reason": "deletes rows with no filter"
+    },
+    {
+      "id": "high-risk-score",
+      "min_risk": 0.8,
+      "reason": "the scorer rated this call high risk"
+    }
+  ]
+}
