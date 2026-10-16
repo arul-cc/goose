@@ -277,6 +277,12 @@ ENV HOME=/home/goose \
     GOOSE_DISABLE_KEYRING=1 \
     GOOSE_RECIPE_PATH=/home/goose/recipes
 
+# Caps one agent turn. A recipe's settings.max_turns is not applied to prompts that arrive
+# over ACP, so without this a looping agent runs goose's default of 1000 tool calls. 25 is
+# what every ComplianceCow recipe already asks for. The environment wins over config.yaml;
+# override per deployment with -e GOOSE_MAX_TURNS=<n>.
+ENV GOOSE_MAX_TURNS=25
+
 # Only the cache is per-user and writable. Servers from mcp-servers/ are baked
 # into a shared, read-only tool dir above, with their executables on the default
 # PATH — so `cmd: veza-query-mcp` in config.yaml resolves with no path and no
