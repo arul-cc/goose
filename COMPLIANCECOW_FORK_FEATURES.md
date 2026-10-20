@@ -6,8 +6,8 @@ WebSocket↔SSE bridge). Use it as the single source of truth when rebasing onto
 new upstream, onboarding, or restoring a feature.
 
 - **goose fork (Rust):** `/Users/Arul/Documents/rust/goose/` — branch
-  `acp-migration`, rebased onto `block/goose` `main` **2026-10-15**
-  (upstream `716bb92ce`, goose 1.55.0)
+  `acp-migration`, rebased onto `block/goose` `main` **2026-10-20**
+  (upstream `9920efa16`, goose 1.55.0)
 - **CowGooseService (Go):** `/Users/Arul/Documents/projects/continube/ComplianceCow/src/cowgooseservice/`
 - **cow-mcp (Python):** `http://0.0.0.0:45678/mcp`
 
@@ -45,6 +45,95 @@ feature-by-feature reconciliation. New crate layout:
 ---
 
 ## Sync log
+
+### 2026-10-20 — 26 upstream commits (1.55.0, no version bump), one trivial conflict
+
+Rebased onto `upstream/main` at `9920efa16`. 138 files changed upstream, **8 shared with
+the fork**. 69 fork commits replayed: 67 identical under `range-diff`, 2 changed, none
+missing, none new. The merge commit made when `feat/tool-scoring` was merged into
+`acp-migration` is dropped by a linear rebase; its six scoring commits are replayed one by
+one. §1-3, §4, §9, §12, §14, §15 and §16 survived with their tests green.
+
+**The conflict (`crates/goose/Cargo.toml`, replaying the §4 client commit).** Both sides
+appended a dependency to the end of the same list: upstream's #12952 added `boa_engine`
+(it replaces the PCTX code-mode runtime), the fork added `sse-stream`. Kept both.
+
+**The other changed commit (`fix: extension passing in delegate`, §12).** It rebased
+without a conflict, but upstream edited the lines around it. Its `summon.rs` part is now
+dropped in a follow-up commit (`b6d722b6b`) — see #12938 below. Its Dockerfile and
+`build-image.sh` parts stay.
+
+**Upstream changes that matter to the fork, checked**
+- **#12938 (`21d873eec`) — recipe extensions load for slash commands and delegation**
+  (`summon.rs`, §12). `resolve_subagent_config` now starts from
+  `resolve_extensions_for_new_session`, which uses the recipe's declared extensions and
+  filters out the unavailable ones. The fork's own earlier fix for the same problem
+  (`2d4f836f9`) merged the recipe's extensions onto the parent's afterwards. That loop
+  was redundant with upstream's change, and it re-added extensions the availability filter
+  had dropped, so it was **removed (`b6d722b6b`)** and upstream's behaviour now applies.
+  **Behaviour change:** a delegated recipe that declares extensions gets exactly those,
+  not the parent's plus its own. A recipe that declares none still inherits the parent's.
+  The ComplianceCow sub-recipes declare their own (`todo` and the cow-mcp server), so they
+  are unaffected on paper; a live delegate with a real model has not confirmed it.
+- **#12992 (`0742c80de`) — a subagent's turn limit falls back to the global limit.** With
+  the image default `GOOSE_MAX_TURNS=25`, subagents are now capped at 25 turns too. Not
+  exercised live.
+- **#12946 — `GOOSE_MAX_CONCURRENT_SUBAGENTS`** limits concurrent subagents. The fork sets
+  nothing for it.
+- **#12998 (`75e13d7ba`) — subagent sessions are linkable and view-only.** Touches
+  `acp/server.rs` and `extension_manager/mod.rs` (§4's file). Auto-merged; the §4 header
+  forwarding tests pass.
+- **#12940 — faster list-sessions query** (`session_manager.rs`). Auto-merged. The session
+  list the Go bridge relies on was not exercised live.
+- **#12952 — code mode now runs on Boa instead of PCTX.** Large `Cargo.lock` change. The
+  fork's image features (`rustls-tls,acp-http,scheduler`) do not include `code-mode`.
+- #12935 (skills discovery into the GDK), #12949 (removes the `enable_subagents` prompt
+  variable), #12928 (OSC 7501 session status), #12962 (ACP loads the live model catalog),
+  #12595 (tests gated on their features) and the desktop and provider fixes touched shared
+  files or none, and needed nothing from the fork.
+
+**Verification:** 45/45 fork markers, `range-diff` as above, `compliancecow_features_test`
+11/11, `cargo fmt --check` clean, `clippy -D warnings` clean on `goose` (CI's feature set)
+and `goose-cli`. `summon` and `session_secrets` tests: 49 passed, including upstream's
+`delegate_extension_selection`, re-run after the loop was removed (49 passed, fork feature
+test 11/11, clippy clean, 45/45 markers). `cargo test -p goose --lib` with that set and
+`RUST_MIN_STACK=8388608`, skipping the hang-prone upstream test, run after the removal:
+**2277 passed / 2 failed**, both known: `provider_lifecycle` (asserts "agent called goose";
+the fork rebrands the agent) and the load-sensitive `rejected_retry_surfaces_the_error`,
+which passes alone (and passed in the run before the removal). The count is 11 below the last sync's
+2289; #12595 gates tests behind feature flags, which probably accounts for it (not checked
+test by test). The identifier audit in `sync-upstream.md` step 5 shows the same three
+names missing before and after (`update_extension_data`, `cache_control_disabled`,
+`ANTHROPIC_CACHE_TTL`), so the sync did not change it.
+Release image built from the synced branch (revision `b6d722b6b`, with the
+`--with-tool-scoring` layer): **3m59s** at `--jobs 2`, no out-of-memory failure, the
+`goose serve` check and the 5 fork-code markers both passing, provenance
+`sync-upstream-20261020 @ b6d722b6b54d`. In the image: goose 1.55.0, `GOOSE_MAX_TURNS=25`,
+and the scoring hook, which allows in shadow mode and blocks a credential read in enforce
+mode. The image was not run as a server, so none of the live checks below were done on it.
+
+**Operational notes**
+- **`/usr/local/bin/cmake` is an Intel binary too** ("Bad CPU type"), alongside the Intel
+  git and ccache noted before. `llama-cpp-sys-2` runs it when `goose-cli` is built. The
+  repo's Hermit `bin/cmake` (4.2.3) works; put a wrapper that runs it first on `PATH`, and a
+  pass-through `ccache` (`exec "$@"`) as well, or the cold build fails with error 126.
+- **`scripts/build-image.sh` could not read git when run in the background.** The Intel
+  git failed with "Bad CPU type" and the script's `|| echo unknown` fallbacks then tagged
+  the image `unknown-unknown`. It now puts `/usr/bin` first for git and refuses to push an
+  image whose branch or revision it cannot read.
+- **`git rebase --autostash`** set the one modified tracked file aside and restored it.
+
+**Not verified — read before relying on it**
+- `GOOSE_SUBAGENT_RESUME` under the live loop, and `delegate` with a real model, as on the
+  last two syncs.
+- The subagent turn cap (#12992) with `GOOSE_MAX_TURNS=25`, and a list-sessions call from
+  the Go bridge (#12940).
+- `scripts/validate-compliancecow.py` (needs goose and CowGooseService up together, and a
+  security context).
+
+Follow-ups, none actioned:
+- Commit the `build-image.sh` git fix (still uncommitted).
+- Update the `Dockerfile.server` comment about login-shell PATH (carried over).
 
 ### 2026-10-15 — 34 upstream commits (1.54.0 → 1.55.0), one conflict, in §12
 
@@ -485,6 +574,10 @@ was overwritten before it could be read. Not reproduced, not explained.
   applies `config.headers` to the `ApiClient` via `with_headers`
   (`goose-providers/src/anthropic.rs`). Declarative custom providers get their
   headers for free.
+- **Recipe extensions for delegated subagents (fork commit `2d4f836f9`, dropped
+  2026-10-20).** Upstream's #12938 resolves a delegated recipe's own extensions through
+  `resolve_extensions_for_new_session` (`summon.rs`). The fork's merge of them onto the
+  parent's was removed; see the 2026-10-20 sync-log entry for the behaviour change.
 - **§7 `available_tools` filtering.** Upstream carries `available_tools` on the
   extension config variants and filters via `ExtensionManager::filter_tools`
   ("empty = all tools available" — identical semantics to the fork).
