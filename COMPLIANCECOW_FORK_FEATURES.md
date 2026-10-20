@@ -738,6 +738,61 @@ extension added by any other route is dropped. That is correct only where the
 recipe owns the session's extensions, which is the platform's case. Applying twice
 changes nothing, which is what makes it safe on every resume.
 
+### §16 Tool-call scoring and policy — added 2026-10-15 (`plugins/tool-scoring`)
+
+A goose hook plugin that scores every tool call and can refuse the dangerous ones.
+It changes no Rust: goose loads plugins from `$HOME/.agents/plugins`, so the feature
+is a directory.
+
+- **Hook.** `hooks/hooks.json` runs `scripts/score_step.py` (through
+  `uv run --no-project --no-python-downloads --python 3.12`) on `PreToolUse`,
+  `PostToolUse` and `PostToolUseFailure`. Timeout 5 s, `on_failure: allow`.
+- **Records.** One JSON line per phase in `$GOOSE_SCORE_DIR` (default
+  `~/.local/state/goose/tool-scores`), joined by `tool_call_id`. `scripts/show_scores.py`
+  reads them (`--follow`, `--min-risk`, `--blocked`). Secret-looking keys and values
+  in the arguments are redacted before anything is written or sent.
+- **Scorers** (`GOOSE_SCORER`). `rules` is the default: deterministic, no network.
+  `jev` asks TypeSafe's Jev (`POST $GOOSE_SCORER_URL/v1/systemone`) three questions —
+  risky, destructive, exfiltrates — and takes the highest probability as the risk.
+  A scorer with no key, no connection, or slower than `GOOSE_SCORER_TIMEOUT` (default
+  2 s) leaves the record with an `error` and no risk, and the call proceeds. Checked
+  2026-10-20: no key, a refused connection and a 20 s hang all exit 0 and allow; the
+  hang costs about 2 s per call.
+- **Policy** (`GOOSE_POLICY_MODE`). `shadow` is the default: it records
+  `policy.decision: block` for calls it would refuse and blocks nothing. `enforce`
+  answers `{"decision":"block","reason":...}`, and goose tells the model not to retry.
+  `off` skips the check. Rules live in `policy.json` (`tool`, `arg_pattern`,
+  `min_risk`, optional `allow_tools`). A `min_risk` rule does not match when there is
+  no score, so the deterministic rules still apply when Jev is down. In enforce mode a
+  policy that cannot be loaded blocks everything.
+- **Delivery.** Records can be POSTed to `GOOSE_SCORE_WEBHOOK` with the header
+  `X-Tool-Score-Token: $GOOSE_SCORE_WEBHOOK_TOKEN`. CowGooseService receives them
+  (Part 2 #7).
+- **Image.** Off unless built with `scripts/build-image.sh --with-tool-scoring`
+  (`ARG WITH_TOOL_SCORING=0` in `Dockerfile.server`), because each tool call then
+  spawns a short script.
+- **Local stack.** `scripts/tool-scoring-local/` runs goose, the bridge and a stand-in
+  model on one machine (`run_host.sh`, `run_bridge.sh`, `run_local.sh`, `mock_llm.py`,
+  `serve_scores.py`). `run_bridge.sh up --branch REF` builds a bridge branch in its own
+  worktree.
+- **Tests.** `python3 -m unittest discover -s plugins/tool-scoring/tests` (53).
+
+⚠️ **Enforcing is only as strong as the hook running.** If the hook cannot start
+(`uv` or Python 3.12 not on `PATH`), goose applies `on_failure`, which is `allow` as
+shipped. When enforcing, set `on_failure: block` on the `PreToolUse` hook.
+
+⚠️ **The policy rules are regexes over the arguments.** They catch accidents and
+obvious patterns, not someone trying to get around them. Shadow mode protects nothing.
+
+⚠️ **`PostToolUse` does not receive the tool's output** in goose 1.54 and 1.55, so a
+record holds the outcome (success or failure), not what the tool returned.
+
+⚠️ With `GOOSE_SCORER=jev` the redacted tool name and arguments leave the pod.
+
+⚠️ **Do not send the webhook token as `Authorization`.** The bridge's shared
+middleware treats any `Authorization` header as a user login token, which is why the
+hook uses `X-Tool-Score-Token`.
+
 ### Operational tweaks (not in §1-11, found via identifier audit)
 
 - **Configurable SQLite pool size.** `crates/goose/src/session/session_manager.rs` —
@@ -818,6 +873,13 @@ unreadable recipe costs the tools, never the resume.
 Note: goose now *also* defaults DeepSeek-v4 thinking off via
 `GOOSE_THINKING_DISABLE_MODELS` (§9), so the two are complementary defenses.
 
+### 7. Tool-call scores to the browser (§16)
+`bridge/tool_scores.go` — `/internal/tool-scores` takes the hook's records, accepts them
+only from loopback with the matching `X-Tool-Score-Token`, and sends a `tool_score`
+message (`score`: risk, label, reasons, scorer, and the policy verdict) to the session's
+WebSocket. The route exists only when `TOOL_SCORE_TOKEN` is set. The UI's handling of
+the new message type has not been checked.
+
 ---
 
 ## Relevant config / env reference
@@ -834,6 +896,11 @@ Note: goose now *also* defaults DeepSeek-v4 thinking off via
 | goose env | `GOOSE_RECIPE_PATH` | Recipe search path; `session/recipe/apply` (§15) resolves ids against it |
 | CowGooseService env | `DEEPSEEK_THINKING_MODE` | `disabled` (default) / `enabled` / `passthrough` |
 | CowGooseService env | `DEEPSEEK_REASONING_EFFORT` | optional effort when enabled |
+| goose env | `GOOSE_SCORER`, `GOOSE_SCORER_API_KEY`, `GOOSE_SCORER_URL`, `GOOSE_SCORER_MODEL`, `GOOSE_SCORER_TIMEOUT` | Tool-call scorer (§16): `rules` by default; `jev` needs the key; timeout defaults to 2 s |
+| goose env | `GOOSE_POLICY_MODE`, `GOOSE_POLICY_FILE` | Policy (§16): `shadow` (default), `enforce` or `off`; rules default to `plugins/tool-scoring/policy.json` |
+| goose env | `GOOSE_SCORE_DIR`, `GOOSE_SCORE_WEBHOOK`, `GOOSE_SCORE_WEBHOOK_TOKEN` | Where score records go: a directory, and optionally a POST target with its token (§16) |
+| goose env | `GOOSE_MAX_TURNS` | Turn cap per prompt. goose's default is 1000; `Dockerfile.server` sets 25. A recipe's `settings.max_turns` is **ignored over ACP**, so this is the only limit. At the cap the agent ends with "I've reached the maximum number of actions…" and a new prompt restarts the count |
+| CowGooseService env | `TOOL_SCORE_TOKEN` | Enables `/internal/tool-scores` (Part 2 #7); the goose host posts with the same value as `GOOSE_SCORE_WEBHOOK_TOKEN` |
 
 ## Verifying the fork features
 
