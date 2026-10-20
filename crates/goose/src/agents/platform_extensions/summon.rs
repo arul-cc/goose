@@ -1274,16 +1274,6 @@ impl SummonClient {
             )),
         );
 
-        if let Some(ref recipe_exts) = recipe.extensions {
-            for ext in recipe_exts {
-                if let Some(pos) = extensions.iter().position(|e| e.name() == ext.name()) {
-                    extensions[pos] = ext.clone();
-                } else {
-                    extensions.push(ext.clone());
-                }
-            }
-        }
-
         if let Some(filter) = &params.extensions {
             if filter.is_empty() {
                 extensions = Vec::new();
