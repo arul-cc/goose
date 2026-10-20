@@ -256,9 +256,11 @@ RUN useradd -m -u 1000 -s /bin/bash goose && \
     chown -R goose:goose /home/goose
 
 # Tool-call scoring hook (plugins/tool-scoring): records a risk score for every
-# tool call and never blocks one. Off unless the image is built with
-# --build-arg WITH_TOOL_SCORING=1, because each tool call then runs a short
-# script before and after it. goose finds plugins under $HOME/.agents/plugins.
+# tool call. By default it only watches (GOOSE_POLICY_MODE=shadow); with
+# GOOSE_POLICY_MODE=enforce it blocks calls that match plugins/tool-scoring/
+# policy.json. Off unless the image is built with --build-arg
+# WITH_TOOL_SCORING=1, because each tool call then runs a short script before
+# and after it. goose finds plugins under $HOME/.agents/plugins.
 ARG WITH_TOOL_SCORING=0
 COPY plugins/tool-scoring /opt/goose/plugins/tool-scoring
 RUN if [ "$WITH_TOOL_SCORING" = "1" ]; then \
