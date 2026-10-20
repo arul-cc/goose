@@ -110,7 +110,19 @@ Release image built from the synced branch (revision `b6d722b6b`, with the
 `goose serve` check and the 5 fork-code markers both passing, provenance
 `sync-upstream-20261020 @ b6d722b6b54d`. In the image: goose 1.55.0, `GOOSE_MAX_TURNS=25`,
 and the scoring hook, which allows in shadow mode and blocks a credential read in enforce
-mode. The image was not run as a server, so none of the live checks below were done on it.
+mode.
+
+**Full-stack validation, on that image (`scripts/validate-compliancecow.py`, the real bridge,
+vault and cow-mcp): 16 passed, 0 failed, 1 skipped.** goose ran from the image on :3000
+behind the live CowGooseService. Passing: session list, rename and info, fork and delete
+(ACP); `extension_data/set` (§4); a real turn on `deepseek-v4-pro` through the bridge whose
+tool call to cow-mcp came back authorised, with the tool result reaching the browser and
+the text streaming (§4); §1-3 per-session provider; §6 `metadata.user_id`; §9 thinking
+disabled; §12 `cow_tenant.v0` populated; §13 the session named from its conversation, not
+from the recipe title; §14 no credential in `sessions.db` while the non-secret headers are
+kept; the recipe attached. **Skipped: the §4 negative control** (same prompt without
+headers, which cow-mcp must refuse) — the model called no tools in that turn, so it proved
+nothing either way.
 
 **Operational notes**
 - **`/usr/local/bin/cmake` is an Intel binary too** ("Bad CPU type"), alongside the Intel
@@ -122,17 +134,40 @@ mode. The image was not run as a server, so none of the live checks below were d
   the image `unknown-unknown`. It now puts `/usr/bin` first for git and refuses to push an
   image whose branch or revision it cannot read.
 - **`git rebase --autostash`** set the one modified tracked file aside and restored it.
+- **Validating an image rather than the host's binary took several setup steps**, each of
+  which failed the validator with a misleading error until fixed. None was an image fault.
+  - Pass the security context as **one line**. Newlines in the `X-Cow-Security-Context`
+    header give a bare HTTP 400 that never reaches the bridge's log.
+  - The context must carry **`OrgID`** (and the rest of a real login's fields); with only
+    `ID`, `DomainID` and `AuthToken` the bridge's provider lookup fails with
+    `Invalid operation : 'OrgID'`.
+  - The bridge sends its own `working_directory` with `session/new`, and goose refuses a
+    path that does not exist (`-32602 invalid directory path`). Mount that directory in the
+    container at the same path.
+  - goose numbers sessions `YYYYMMDD_N` within its own database, and the bridge's mapping
+    table has a unique constraint on that id. A fresh container database restarts at `_1`
+    and collides with the ids already mapped (`UNIQUE constraint failed:
+    session_mapping.goose_session_id`). Create a few throwaway sessions first so the counter
+    passes them. This is the §14 caveat about ids being unique per database, not per bridge.
+  - The recipes point cow-mcp at `0.0.0.0:45678`, which inside a container is the container.
+    Use a copy with `host.docker.internal`; the real recipes are untouched.
+  - Run it as `goose serve --host 0.0.0.0 --port 3000 --platform desktop --enable-scheduler
+    --dangerously-unauthenticated` with `GOOSE_MODE=auto` and placeholder provider settings;
+    the bridge supplies the real provider per session. Use the default `rules` session type,
+    not `rules-auto`, whose gate would keep sending the agent back on the validator's
+    read-only prompt.
 
 **Not verified — read before relying on it**
 - `GOOSE_SUBAGENT_RESUME` under the live loop, and `delegate` with a real model, as on the
   last two syncs.
 - The subagent turn cap (#12992) with `GOOSE_MAX_TURNS=25`, and a list-sessions call from
   the Go bridge (#12940).
-- `scripts/validate-compliancecow.py` (needs goose and CowGooseService up together, and a
-  security context).
+- The §4 negative control (above): that cow-mcp refuses a call made without headers was not
+  confirmed on this image.
 
 Follow-ups, none actioned:
-- Commit the `build-image.sh` git fix (still uncommitted).
+- Add the validator-on-an-image setup above to `sync-upstream.md` step 6, or script it.
+- Make the validator's negative control reliable (a prompt that forces a tool call).
 - Update the `Dockerfile.server` comment about login-shell PATH (carried over).
 
 ### 2026-10-15 — 34 upstream commits (1.54.0 → 1.55.0), one conflict, in §12
