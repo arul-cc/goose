@@ -1,7 +1,9 @@
 # Autonomous agent loop — design (draft for review)
 
-Status: **draft.** The autonomous recipe exists and has been run four times (phase 0, §12); the bridge
-gate and budgets are not built. Written 2026-10-16, rewritten the same day, updated 2026-10-20. Facts checked
+Status: **draft, partly built.** The autonomous recipe has been run four times by hand (phase 0, §12), and
+the gate, its budgets and their wiring into the bridge's WebSocket path are built and have run live once
+(§14). Run state, the headless path, the API and cleanup are not built. Written 2026-10-16, rewritten the
+same day, updated 2026-10-20. Facts checked
 in the code or by a test are marked **(verified)**; everything else is a proposal or an assumption
 and is listed in §11.
 
@@ -201,7 +203,7 @@ idempotent are listed in the run record as "maybe created" until confirmed.
 
 - **API:** start, status, cancel for a run, built on the headless endpoints.
 - **Events:** an `autonomous_event` message on the existing WebSocket (round started, gate result,
-  budget status, finished) so the UI can show progress.
+  budget status, finished) so the UI can show progress. Built for the WebSocket path; see §14.
 - **Metrics:** success rate, gate rounds to success, cost, failure counts by check.
 - **Failure review (a human in the improvement loop, not the run loop).** Keep every gate failure
   with its check id, error text and the tool calls around it. On a regular schedule a person reads the
@@ -265,6 +267,9 @@ first.
 1. **Bridge harness MVP.** Gate in the bridge (option A), budgets, run state, rule creation only, L1,
    drafts only. Exit: at least 80% of a fixed benchmark set passes unattended, **zero** side effects
    outside drafts, every run within budget.
+   **Status 2026-10-20:** the gate, the budgets and the wiring are built (§14) and ran live once. Not
+   done: run state that survives a bridge restart, the headless path, and the benchmark set, so the exit
+   criteria are not yet measured.
 2. **Service.** API, events, resumability, per-tenant limits, cleanup.
 3. **Stop-hook gate (option B), L2 and other use cases**, only after phase 2 metrics hold.
 
@@ -287,4 +292,71 @@ already used for the bridge: budgets, repeat detection, resume after a crash, ca
 - Stop-hook timeout, and whether it fires when the turn limit ends the turn.
 - Whether the usage numbers the bridge forwards are reliable enough for a cost cap.
 - How `execute_rule` behaves on failure, and how long it takes.
-- Real-model behaviour of the whole loop. Phase 0 exists to find out.
+- Real-model behaviour of the whole loop. Phase 0 and one live gated run (§14) are the only evidence
+  so far.
+
+## 14. As built: the gate in the bridge (2026-10-20)
+
+Code is in the ComplianceCow repo, `src/cowgooseservice/`: the decision function in `autonomous/`
+(branch `cowgoose-autonomous-gate`) and the wiring in `bridge/autonomous_loop.go` and
+`bridge/acp_session_worker.go`. Both are on the local `dev` at `693ffd365`, **not pushed**.
+`AUTONOMOUS_GATE_RULES.md` has the decision rules; this section is how they are attached.
+
+**When it applies.** Only to session types listed in `AUTONOMOUS_SESSION_TYPES` (default
+`rules-auto`). Every other session takes the original path unchanged. An empty value turns it off.
+
+**What happens to a message.**
+1. The worker sends the requirement to goose as the first prompt.
+2. When the prompt returns, the worker waits for goose's queued updates to be handled (goose sends a
+   prompt's updates before its result, and the connection reader queues them in that order), then reads
+   the run's tool calls and the agent's closing text.
+3. `autonomous.Decide` says accept, continue or stop.
+4. Continue: the gate's message goes to goose as the next prompt in the same session. Accept or stop:
+   the run ends with the usual `complete`.
+
+**What the browser receives.** Everything it received before, plus an `autonomous_event` after each
+decision: `data.event` is `gate_accept`, `gate_continue` or `gate_stop`, with `code`, `round`,
+`max_rounds`, `findings` (code and detail each), the `message_to_agent` on a continue, and the agent's
+`report` (status, rule name, summary, created, needs, error) when it gave a valid one. Each decision is
+also one line in the bridge log (`Autonomous gate: ... action=... code=...`). Whether the UI handles the
+new message type was not checked; only Postman was used.
+
+**Settings** (all optional; an invalid value gives the default, never zero):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AUTONOMOUS_SESSION_TYPES` | `rules-auto` | Session types that run through the gate |
+| `AUTONOMOUS_MAX_ROUNDS` | 5 | Gate rounds after the first prompt |
+| `AUTONOMOUS_MAX_MINUTES` | 30 | Wall clock for one run |
+| `AUTONOMOUS_MAX_TOOL_CALLS` | 300 | Tool calls in one run |
+
+**Behaviour worth knowing**
+- One run at a time per session. A second message during a run is refused (`AUTONOMOUS_RUN_ACTIVE`).
+- A cancel reaches the worker, so a cancelled run stops at its next decision instead of sending the agent
+  round again.
+- A prompt that fails is retried once after 2 seconds; two failures in a row stop the run
+  (`INFRA_FAILURE`). A session that stays busy is reported as `SESSION_BUSY`, not as a failed round.
+- An application counts as allowed only if the requirement names it by id or name; `nocredapp` is always
+  allowed.
+- A refusal from the model is reported as the error it is.
+
+**Live result.** Session 20261020_8, the rules-auto recipe: round 1 the agent reported `completed` with the
+rule still in DRAFT, and the gate answered `CONTINUE` on `RULE_NOT_ACTIVE`; round 2 it saved the rule as
+ACTIVE, ran it again and opened the output, and the gate answered `ACCEPT`. The output was right for all
+three sample users. Session 20261020_7 hit a 502 from the dev backend on 8 calls; the agent reported
+`blocked` and the gate stopped the run, correctly.
+
+**Tests.** 117 in the bridge package, which drive the real router, reader goroutine and flush barrier with
+the four recorded runs, under `-race`. They were mutation-checked: of 21 deliberate breaks of the wiring,
+all are caught (3 needed new tests first: the wall clock, a second message starting a fresh run, and an
+old cancel not stopping the next run).
+
+**Not built, and known limits**
+- **Only the WebSocket path.** The headless runner still runs one prompt per execution, with no gate.
+- **No run state.** Counters live in the worker. A bridge restart loses a run; there is no status or
+  start API.
+- **No cleanup.** A run that stops leaves its drafts. Session 20261020_7 left a half-built rule
+  (`rule_2891`) on the dev tenant.
+- **The gate checks mechanics, not meaning.** Run 2's reason text passed every check while hiding the
+  difference between a missing record and a disabled one. ACCEPT means ready for a person to review.
+- **One live gated run** is the only evidence the loop works end to end.

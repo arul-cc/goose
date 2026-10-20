@@ -1,6 +1,6 @@
 # Autonomous loop — gate rules (draft for review)
 
-Status: **draft; implemented in the ComplianceCow repo but not wired in yet** (§8: the decision function and its 87 tests, nothing calls it). Written 2026-10-20. Companion to
+Status: **draft; implemented and wired into the bridge's WebSocket path** (the decision function and 87 tests, plus the wiring in `AUTONOMOUS_LOOP_DESIGN.md` §14). Written 2026-10-20. Companion to
 [AUTONOMOUS_LOOP_DESIGN.md](AUTONOMOUS_LOOP_DESIGN.md) §5. This file says exactly what the bridge
 does each time the agent finishes a prompt. Facts seen in the four phase 0 runs (sessions
 `20261020_1` to `_4`, goose session store) are marked **(seen)**; everything else is a proposal.
@@ -219,11 +219,11 @@ The decision function is pure, so the tests are a table of (final text, tool str
 decision. They were written first and failed against a stub; the function is now implemented and all 87
 pass (also under `-race`).
 
-- Code: `src/cowgooseservice/autonomous/` in the ComplianceCow repo, branch `cowgoose-autonomous-gate`
-  (from `upstream/dev`), uncommitted. `gate.go` has the types and `Decide`; `report.go` parses the
+- Code: `src/cowgooseservice/autonomous/` in the ComplianceCow repo (branch `cowgoose-autonomous-gate`,
+  and on the local `dev`, not pushed). `gate.go` has the types and `Decide`; `report.go` parses the
   run-result block; `stream.go` reads the tool stream; `verify.go` holds V1 to V9; `message.go` builds the
-  messages and the failure signature. **Nothing calls `Decide` yet**; wiring it into the bridge is the next
-  step.
+  messages and the failure signature. `bridge/autonomous_loop.go` calls `Decide` after every prompt of a
+  `rules-auto` session (`AUTONOMOUS_LOOP_DESIGN.md` §14).
 - The package imports only the standard library, so `go test ./autonomous/` runs without the vault the rest
   of the service needs at init.
 - Fixtures in `testdata/*.json` are the four phase 0 sessions, extracted and redacted by
