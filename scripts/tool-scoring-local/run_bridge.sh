@@ -6,6 +6,13 @@
 #                                                        start a prebuilt binary instead of building
 #                                                        from $COMPLIANCECOW_SRC (use it when that
 #                                                        checkout is on a branch without the features)
+#   ./scripts/tool-scoring-local/run_bridge.sh up --branch REF
+#                                                        build REF (a branch, tag or commit of the
+#                                                        ComplianceCow repo) in a separate worktree
+#                                                        and start that; the checkout and its
+#                                                        local.env are not touched and still supply
+#                                                        the environment
+#   ./scripts/tool-scoring-local/run_bridge.sh build REF build REF only and print the binary's path
 #   ./scripts/tool-scoring-local/run_bridge.sh down
 #   ./scripts/tool-scoring-local/run_bridge.sh status
 #   ./scripts/tool-scoring-local/run_bridge.sh log       follow the log
@@ -34,6 +41,28 @@ WORKDIR="$STATE/work"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
+# The Intel git on this machine's PATH fails with "Bad CPU type"; Apple's is in /usr/bin.
+git() { PATH=/usr/bin:$PATH command git "$@"; }
+
+# Builds REF in $STATE/wt-bridge-build, a detached worktree of the ComplianceCow repo, so the working
+# checkout is never switched or modified. The binary is named after the commit, so a build of a
+# different commit never replaces one that may be running. Sets BUILT_BIN.
+build_ref() {
+  local ref="$1" dir="$STATE/wt-bridge-build" sha
+  git -C "$SRC" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "no such branch or commit: $ref"
+  sha="$(git -C "$SRC" rev-parse --short=9 "$ref^{commit}")"
+  mkdir -p "$STATE"
+  if [ -e "$dir/.git" ]; then
+    git -C "$dir" checkout -q --detach "$sha" || die "could not check out $sha in $dir"
+  else
+    git -C "$SRC" worktree add -q --detach "$dir" "$sha" || die "could not create the build worktree $dir"
+  fi
+  echo "building $ref ($sha)..." >&2
+  (cd "$dir/src/cowgooseservice" && PATH=/usr/bin:$PATH go build -buildvcs=false -o "$STATE/cgs-$sha.new" .) || die "build failed"
+  mv -f "$STATE/cgs-$sha.new" "$STATE/cgs-$sha"
+  BUILT_BIN="$STATE/cgs-$sha"
+}
+
 pids_on_port() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null; }
 
 stop_bridge() {
@@ -56,19 +85,31 @@ case "${1:-}" in
     [ -n "$pid" ] && echo "bridge :$PORT running (PID $pid)" || echo "bridge :$PORT not running"
     ;;
   log) exec tail -f "$LOG" ;;
+  build)
+    [ $# -eq 2 ] || die "usage: build REF"
+    build_ref "$2"
+    echo "$BUILT_BIN"
+    ;;
   up)
     shift
     PREBUILT=""
+    BRANCH=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --binary) [ $# -ge 2 ] || die "--binary needs a path"; PREBUILT="$2"; shift 2 ;;
+        --branch) [ $# -ge 2 ] || die "--branch needs a branch, tag or commit"; BRANCH="$2"; shift 2 ;;
         *) die "unknown option: $1" ;;
       esac
     done
+    [ -z "$PREBUILT" ] || [ -z "$BRANCH" ] || die "use --binary or --branch, not both"
     [ -f "$SRC/local.env" ] || die "no $SRC/local.env"
     mkdir -p "$STATE" "$WORKDIR"
     if [ ! -s "$TOKEN_FILE" ]; then
       (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' >"$TOKEN_FILE")
+    fi
+    if [ -n "$BRANCH" ]; then
+      build_ref "$BRANCH"
+      PREBUILT="$BUILT_BIN"
     fi
     if [ -n "$PREBUILT" ]; then
       [ -x "$PREBUILT" ] || die "$PREBUILT is not an executable file"
