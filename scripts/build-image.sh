@@ -73,6 +73,11 @@ if ! docker buildx version >/dev/null 2>&1; then
 fi
 
 # --- git provenance ---------------------------------------------------------
+# An Intel git earlier on PATH fails here with "Bad CPU type" when this script is run in the
+# background, and the `|| echo unknown` fallbacks below then label the image unknown-unknown.
+# Apple's git is always in /usr/bin, so look there first.
+git() { PATH=/usr/bin:$PATH command git "$@"; }
+
 # Never read the remote URL: this repo's remotes embed an access token, and
 # anything derived from them would be baked into the image labels.
 BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -90,6 +95,10 @@ if [ -n "$REGISTRY" ]; then IMAGE="$REGISTRY/$NAME"; else IMAGE="$NAME"; fi
 REF="$IMAGE:$TAG"
 
 [ "$PUSH" -eq 1 ] && [ -z "$REGISTRY" ] && die "--push needs --registry"
+if [ "$BRANCH" = unknown ] || [ "$SHA" = unknown ]; then
+  [ "$PUSH" -eq 1 ] && die "cannot read the git branch or revision, so the image would be unidentifiable; not pushing it"
+  warn "cannot read the git branch or revision; the image will be tagged $TAG"
+fi
 
 # --- preflight: the mistakes that cost real time ----------------------------
 echo "goose ACP image"
