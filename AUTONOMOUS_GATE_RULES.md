@@ -1,6 +1,6 @@
 # Autonomous loop — gate rules (draft for review)
 
-Status: **draft; the gate is not implemented** (only its failing tests exist, §8). Written 2026-10-20. Companion to
+Status: **draft; implemented in the ComplianceCow repo but not wired in yet** (§8: the decision function and its 87 tests, nothing calls it). Written 2026-10-20. Companion to
 [AUTONOMOUS_LOOP_DESIGN.md](AUTONOMOUS_LOOP_DESIGN.md) §5. This file says exactly what the bridge
 does each time the agent finishes a prompt. Facts seen in the four phase 0 runs (sessions
 `20261020_1` to `_4`, goose session store) are marked **(seen)**; everything else is a proposal.
@@ -88,7 +88,7 @@ listed.
 | # | Check | Why | Code on failure |
 |---|---|---|---|
 | V1 | Every item in `checks` has `result: pass` and a non-empty `evidence` string | `completed` means every check passed with evidence | `CLAIM_CHECKS_NOT_PASSING` |
-| V2 | A successful `execute_rule` exists such that every *successful* `create_rule` / `update_rule` / `configure_rule_output_schema` call had its **result** before that `execute_rule` was **issued** | A rule changed after its last verification is unverified. Failed changes do not count. | `RULE_CHANGED_AFTER_VERIFY` |
+| V2 | A successful `execute_rule` exists such that every call that changed the rule had its **result** before that `execute_rule` was **issued**. Changing calls are `create_rule`, `update_rule`, `configure_rule_output_schema` when they succeeded, and `confirm_template_input` / `confirm_parameter_input` when their result says `rule_updated`. A call with no result yet counts as a change, because it may already have happened. | A rule changed after its last verification is unverified. Failed changes do not count. | `RULE_CHANGED_AFTER_VERIFY` |
 | V3 | For that `execute_rule`'s `execution_id`, a `fetch_execution_progress` result shows `COMPLETED` and zero errored tasks (`task_stats.error`) | The run actually finished | `EXECUTION_NOT_CONFIRMED` |
 | V4 | A `fetch_output_file` call was issued after V3's completing result arrived (only evaluated when V3 holds) | The agent looked at the output, not only the status | `OUTPUT_NOT_INSPECTED` |
 | V5 | The last `create_rule` / `update_rule` result reports status `ACTIVE` | A DRAFT rule is not done (run 4 had DRAFT 85% mid-run) | `RULE_NOT_ACTIVE` |
@@ -195,6 +195,9 @@ from the agent's text. For `INCOMPLETE_NO_REPORT` add: "Do not ask questions; de
 
 These are starting guesses, not measurements from enough runs. Phase 0 had four.
 
+A budget left at zero allows nothing, so a caller that forgets to set one stops runs instead of letting
+them go on for ever. "Exceeded" means strictly more than the limit.
+
 ## 7. What the gate cannot catch
 
 Be explicit, so nobody reads ACCEPT as "correct":
@@ -213,16 +216,23 @@ never saw, and an independent read-only reviewer.
 ## 8. Tests
 
 The decision function is pure, so the tests are a table of (final text, tool stream, run state) →
-decision. They are written and **fail against a stub** (`Decide` always returns `NOT_IMPLEMENTED`):
-69 fail, and 5 purity guards pass because a stub is pure.
+decision. They were written first and failed against a stub; the function is now implemented and all 87
+pass (also under `-race`).
 
 - Code: `src/cowgooseservice/autonomous/` in the ComplianceCow repo, branch `cowgoose-autonomous-gate`
-  (from `upstream/dev`), uncommitted. `gate.go` has the types and the stub; `gate_test.go` the tests.
+  (from `upstream/dev`), uncommitted. `gate.go` has the types and `Decide`; `report.go` parses the
+  run-result block; `stream.go` reads the tool stream; `verify.go` holds V1 to V9; `message.go` builds the
+  messages and the failure signature. **Nothing calls `Decide` yet**; wiring it into the bridge is the next
+  step.
 - The package imports only the standard library, so `go test ./autonomous/` runs without the vault the rest
   of the service needs at init.
 - Fixtures in `testdata/*.json` are the four phase 0 sessions, extracted and redacted by
   `testdata/extract_fixtures.py` (hosts and tenant ids replaced; discovery results trimmed because the gate
   never reads them; everything the gate parses is kept as recorded).
+- **The tests were mutation-checked:** 25 deliberate breaks of the implementation (a threshold changed, a
+  check removed, first report block instead of last, and so on) were each caught. Two survived at first, both
+  behaviours added during implementation (confirm calls and pending calls counting as changes); tests were
+  added and they are caught now.
 
 | Fixture | Expected |
 |---|---|
