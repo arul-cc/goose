@@ -18,8 +18,8 @@
 #   ./scripts/tool-scoring-local/run_bridge.sh log       follow the log
 #
 # Environment comes from $COMPLIANCECOW_SRC/local.env, read as data (it cannot be sourced: a bare
-# `&` in SLACK_BOT_URL aborts the shell, and one line uses `KEY = value`), plus the two variables
-# local.env lacks. Values are never printed.
+# `&` in SLACK_BOT_URL aborts the shell, and one line uses `KEY = value`), plus the variables
+# local.env lacks (the port, ACP, and how long a running turn survives its browser). Values are never printed.
 #
 # TOOL_SCORE_TOKEN turns on the bridge's /internal/tool-scores endpoint, which forwards goose's
 # tool-call risk scores to the browser. The token is generated once into $STATE/score-token and
@@ -145,6 +145,9 @@ for line in open(os.path.join(os.environ["SRC"], "local.env"), encoding="utf-8",
     loaded += 1
 env["COW_GOOSE_SERVICE_PORT_NUMBER"] = os.environ["PORT"]
 env["COWGOOSE_USE_ACP"] = "1"
+# A browser that goes away (a reload, a closed lid) must not end an orchestration that takes an hour: the bridge cancels a running
+# turn this long after its socket closes, 60 seconds by default. Set COWGOOSE_DRAIN_TIMEOUT in the caller's environment to change it.
+env["COWGOOSE_DRAIN_TIMEOUT"] = os.environ.get("COWGOOSE_DRAIN_TIMEOUT") or env.get("COWGOOSE_DRAIN_TIMEOUT") or "14400"
 env["GOOSE_CONFIG_PATH"] = os.environ["CFG"]
 env["TOOL_SCORE_TOKEN"] = open(os.environ["TOKEN_FILE"]).read().strip()
 log = open(os.environ["LOG"], "ab")
